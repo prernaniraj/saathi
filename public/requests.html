@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Family requests | Saathi</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;600&family=Newsreader:wght@500;600&display=swap">
+<link rel="stylesheet" href="/css/app.css">
+</head>
+<body>
+<div class="wrap">
+<div id="shell"></div>
+<h2>New family request</h2>
+<form id="f"><label>Family name<input name="family" required></label><label>Parent’s name<input name="parent" required></label><label>Parent’s city in India<input name="city" list="cities" required></label>
+<label>Visits per week<select name="visitsPerWeek"><option>1</option><option selected>2</option><option>3</option><option>5</option></select></label>
+<label>What they need<select name="need"><option>Companionship</option><option>Medical visit escort</option><option>Daily check-in</option></select></label><button class="btn">Submit request</button></form>
+<datalist id="cities"><option>Hyderabad</option><option>Bengaluru</option><option>Chennai</option><option>Pune</option></datalist>
+<h2>Requests</h2><main id="app"></main>
+<p class="mute" id="live" aria-live="polite"></p>
+</div>
+<script type="module" src="/js/requests.js"></script>
+</body>
+</html>
