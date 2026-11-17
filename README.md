@@ -1,46 +1,52 @@
 # Saathi
 
-Proof of concept for a care-leaver-to-caregiver pipeline. Young adults leaving orphanages are trained as eldercare companions, certified, matched to families abroad who pay for visits, and log visit updates the family can read.
+Proof of concept for a care-leaver-to-caregiver pipeline: train young adults leaving orphanages as eldercare companions, certify them, match them to families abroad, and share visit updates. Python and FastAPI back end, plain HTML front end.
 
-No dependencies. Needs Node 20 or newer.
+Read `SPEC.md` first. It holds the requirements, the researched feature backlog and the rule that every change needs a requirement, a test, an audit event, a log line and a metric.
+
+## Run
 
 ```
-npm start        # http://localhost:3000  (PORT=4000 npm start to change it)
-npm test         # API rule tests
-npm run dev      # restart on file changes
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+python -m app                 # http://127.0.0.1:3000  (PORT=4000 to change)
+pytest                        # all tests, needs the dev extras
+python -m unittest tests.test_service   # rule, audit and metrics tests, no installs
+python scripts/trace_matrix.py          # rebuilds docs/TRACEABILITY.md, exits 1 on gaps
 ```
 
-Data lives in `data/db.json` (created on first run, ignored by git). Delete it to restore the sample data, or `POST /api/reset`.
+Data is saved in `data/db.json`. Delete it to restore the sample data. A corrupt file stops startup so audit history is never overwritten.
 
 ## Pages
 
-| Page | Purpose |
+Dashboard `/`, Pipeline, Family requests, Visit log, Family view, and Audit (change history with a chain check).
+
+## Observability and traceability
+
+| What | Where |
 | --- | --- |
-| `/` | Dashboard: stage counts, flagged visits, waiting matches |
-| `/caregivers.html` | Add care-leavers, run training modules, certify |
-| `/requests.html` | Family requests, match a certified caregiver (same city first) |
-| `/visits.html` | Log a visit and see all updates |
-| `/family.html?r=r1` | What one family sees: their caregiver and visit updates |
+| Request ID and trace ID on every response | `X-Request-ID`, `X-Trace-ID` headers; send `X-Request-ID` or `traceparent` to reuse yours |
+| JSON logs with request ID, trace ID, action, actor, spec refs | stdout |
+| Prometheus metrics | `GET /metrics` |
+| Liveness and readiness | `GET /healthz`, `GET /readyz` (503 if the audit chain is broken) |
+| Hash-chained audit log | `GET /api/audit`, `GET /api/audit/verify`, Audit page |
+| Requirement to code to test | `docs/TRACEABILITY.md` |
+| Optional OpenTelemetry export | `pip install -e ".[otel]"` and set `OTEL_EXPORTER_OTLP_ENDPOINT` |
 
-## Rules enforced by the API (`src/api.js`)
-
-- Training starts only from Applied; modules change only during training.
-- Certify needs all five modules.
-- Match needs a certified caregiver and an open request.
-- Visits need a matched request, a valid mood and a note.
+Follow one change end to end: find its request ID in the logs, open the audit event with the same request ID, read its spec refs, and find the tests in the matrix.
 
 ## Layout
 
 ```
-server.js        static files + JSON API, no framework
-src/domain.js    stages, modules, moods
-src/api.js       routes and rules (pure function, easy to test)
-src/store.js     JSON-file store (in-memory when no file given)
-src/seed.js      fictional sample data
-public/          multi-page front end (plain HTML + ES modules)
-test/            node:test suite
+SPEC.md              requirements, API, research, backlog
+app/domain.py        stages, modules, errors, context types
+app/service.py       business rules; @mutation writes audit, log and metric
+app/audit.py         hash-chained audit log
+app/observability.py JSON logs, metrics, optional OpenTelemetry
+app/store.py         JSON-file store (SQLite or Postgres is REQ-STORE-01)
+app/main.py          FastAPI routes, middleware, static files
+public/              front end
+tests/               test_service.py (stdlib) and test_api.py (FastAPI client)
+scripts/trace_matrix.py   traceability check
+docs/TRACEABILITY.md      generated matrix
 ```
-
-## Not built yet
-
-Logins and roles, notifications to families, caregiver pay and background checks, a real database. The store and API are separated so a database can replace `src/store.js`.

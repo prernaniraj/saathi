@@ -20,7 +20,7 @@ export async function run(fn, okMessage) {
   try { await fn(); if (okMessage) say(okMessage); } catch (e) { say(e.message, true); }
 }
 
-const PAGES = [['', 'Dashboard'], ['caregivers.html', 'Pipeline'], ['requests.html', 'Family requests'], ['visits.html', 'Visit log'], ['family.html', 'Family view']];
+const PAGES = [['', 'Dashboard'], ['caregivers.html', 'Pipeline'], ['requests.html', 'Family requests'], ['visits.html', 'Visit log'], ['family.html', 'Family view'], ['audit.html', 'Audit']];
 export function shell() {
   const here = location.pathname.split('/').pop();
   $('#shell').innerHTML = `<header><h1>Saathi</h1><p>Train young adults leaving orphanages as eldercare companions, then match them to families paying from abroad.</p></header>

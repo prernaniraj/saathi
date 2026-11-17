@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Audit | Saathi</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;600&family=Newsreader:wght@500;600&display=swap">
+<link rel="stylesheet" href="/css/app.css">
+</head>
+<body>
+<div class="wrap">
+<div id="shell"></div>
+<h2>Change history</h2>
+<p class="mute">Every change, who made it, and the request that caused it. Use the request ID to find the matching log lines.</p>
+<div class="row"><button class="btn" id="verify">Verify the chain</button></div>
+<main id="app"></main>
+<p class="mute" id="live" aria-live="polite"></p>
+</div>
+<script type="module" src="/js/audit.js"></script>
+</body>
+</html>
