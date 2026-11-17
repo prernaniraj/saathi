@@ -5,3 +5,5 @@ __pycache__/
 data/db.json
 data/db.tmp
 .DS_Store
+data/saathi.sqlite
+data/db.json.migrated

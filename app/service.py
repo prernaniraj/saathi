@@ -5,6 +5,7 @@ import functools
 import logging
 from datetime import date, datetime, timezone
 
+from .auth import ROLES, find_user, hash_password, public_user
 from .domain import MODULES, MOODS, NOTES, STAGES, VERIFICATION, VERIFICATION_STATUSES, Change, Ctx, DomainError
 from .observability import event, metrics
 from .trace import implements
@@ -71,13 +72,105 @@ def _find(store, collection: str, item_id: str, label: str) -> dict:
     raise DomainError(404, f"{label} not found.")
 
 
-def get_state(store) -> dict:
+@implements("REQ-RBAC-01")
+def get_state(store, user: dict | None = None) -> dict:
+    """Full state for a coordinator (or no user, e.g. service-level callers).
+
+    A caregiver sees only their own caregiver record (public fields, no date of
+    birth), their matched requests and their own visits. A family sees only its
+    own request, that request's visits, and its matched caregiver's public info.
+    """
     with store.lock:
         data = {k: v for k, v in store.db.items() if k in ("caregivers", "requests", "visits")}
         state = copy.deepcopy({"meta": {"stages": STAGES, "notes": NOTES, "modules": MODULES, "moods": MOODS, "verification": [{"id": k, "label": l} for k, l in VERIFICATION], "verification_statuses": VERIFICATION_STATUSES}, **data})
         for c in state["caregivers"]:
             c.pop("dateOfBirth", None)
+        if user is None or user.get("role") == "coordinator":
+            return state
+        if user.get("role") == "caregiver":
+            cid = user.get("caregiverId")
+            state["caregivers"] = [c for c in state["caregivers"] if c["id"] == cid]
+            request_ids = {r["id"] for r in state["requests"] if r.get("caregiverId") == cid}
+            state["requests"] = [r for r in state["requests"] if r["id"] in request_ids]
+            state["visits"] = [v for v in state["visits"] if v.get("caregiverId") == cid]
+            return state
+        # Family.
+        rid = user.get("requestId")
+        matched = [r for r in state["requests"] if r["id"] == rid]
+        caregiver_id = matched[0].get("caregiverId") if matched else None
+        state["requests"] = matched
+        state["visits"] = [v for v in state["visits"] if v["requestId"] == rid]
+        state["caregivers"] = [c for c in state["caregivers"] if c["id"] == caregiver_id] if caregiver_id else []
         return state
+
+
+def _strip_dob(obj) -> None:
+    """Remove dateOfBirth keys, at any depth, from a copied audit payload."""
+    if isinstance(obj, dict):
+        obj.pop("dateOfBirth", None)
+        for value in obj.values():
+            _strip_dob(value)
+    elif isinstance(obj, list):
+        for value in obj:
+            _strip_dob(value)
+
+
+@implements("REQ-RBAC-01")
+def scoped_audit(store, user: dict | None = None, entity_id: str | None = None, action: str | None = None, limit: int = 50) -> list:
+    """Audit events visible to a user. A coordinator sees all; a caregiver sees
+    events about their own caregiver record, matched requests and own visits; a
+    family sees events about its own request and that request's visits.
+
+    Date of birth is stripped from before/after payloads for non-coordinators,
+    so it cannot leak through the audit log.
+    """
+    with store.lock:
+        events = store.audit.query(entity_id, action, 500)
+        if user is None or user.get("role") == "coordinator":
+            visible = events
+        elif user.get("role") == "caregiver":
+            cid = user.get("caregiverId")
+            keep = {cid}
+            keep |= {r["id"] for r in store.db["requests"] if r.get("caregiverId") == cid}
+            keep |= {v["id"] for v in store.db["visits"] if v.get("caregiverId") == cid}
+            visible = [e for e in events if e["entity_id"] in keep]
+        else:  # Family.
+            rid = user.get("requestId")
+            keep = {rid}
+            keep |= {v["id"] for v in store.db["visits"] if v["requestId"] == rid}
+            visible = [e for e in events if e["entity_id"] in keep]
+        out = copy.deepcopy(visible[:limit])
+        if user is not None and user.get("role") != "coordinator":
+            for e in out:
+                _strip_dob(e.get("before"))
+                _strip_dob(e.get("after"))
+        return out
+
+
+@mutation("user.created", "REQ-RBAC-01")
+def create_user(store, email: str, role: str, password: str, caregiver_id: str | None = None, request_id: str | None = None) -> Change:
+    email = (email or "").strip().lower()
+    if "@" not in email:
+        raise DomainError(400, "Enter a valid email address.")
+    if role not in ROLES:
+        raise DomainError(400, "Unknown role.")
+    if len(password or "") < 8:
+        raise DomainError(400, "Password must be at least 8 characters.")
+    if find_user(store.db, email) is not None:
+        raise DomainError(409, "An account with this email already exists.")
+    if role == "caregiver":
+        if not caregiver_id:
+            raise DomainError(400, "A caregiver account needs a caregiver to link to.")
+        _find(store, "caregivers", caregiver_id, "Care-leaver")
+    if role == "family":
+        if not request_id:
+            raise DomainError(400, "A family account needs a request to link to.")
+        _find(store, "requests", request_id, "Request")
+    salt, digest = hash_password(password)
+    user = {"email": email, "role": role, "caregiverId": caregiver_id, "requestId": request_id, "password_salt": salt, "password_hash": digest}
+    store.db.setdefault("users", []).append(user)
+    public = public_user(user)
+    return Change("user", email, None, copy.deepcopy(public), copy.deepcopy(public))
 
 
 @mutation("caregiver.created", "REQ-PIPE-01", "REQ-AFT-02")

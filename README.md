@@ -15,7 +15,15 @@ python -m unittest tests.test_service   # rule, audit and metrics tests, no inst
 python scripts/trace_matrix.py          # rebuilds docs/TRACEABILITY.md, exits 1 on gaps
 ```
 
-Data is saved in `data/db.json`. Delete it to restore the sample data. A corrupt file stops startup so audit history is never overwritten.
+Data is saved in `data/saathi.sqlite`. Delete it to restore the sample data. A corrupt file stops startup so audit history is never overwritten. If a legacy `data/db.json` is present on first boot, it is imported once into SQLite and renamed to `data/db.json.migrated` (never deleted).
+
+## Login
+
+Every `/api/*` route except login needs a bearer token: log in at `/login.html` or `POST /api/auth/login` with `{email, password}` and send `Authorization: Bearer <token>`. Tokens expire after 7 days; `POST /api/auth/logout` invalidates one. The front end stores the token in `sessionStorage` and redirects to the login page on a 401.
+
+The seed coordinator account is `coordinator@saathi.local`. Its password is `SAATHI_SEED_PASSWORD` when that environment variable is set, otherwise a randomly generated password printed once to stdout at first boot — change it after first login. (There is no change-password endpoint yet; set `SAATHI_SEED_PASSWORD` before first boot to choose the password.) The coordinator creates other accounts with `POST /api/auth/users` (role `coordinator`, `caregiver` linked to a caregiver, or `family` linked to a request).
+
+Local development only: with `SAATHI_DEV_NO_AUTH=1`, API calls without a token are accepted with the `X-Actor` header as the coordinator, as before. Never set this outside local development. `/healthz`, `/readyz` and `/metrics` need no login.
 
 ## Pages
 
@@ -39,11 +47,12 @@ Follow one change end to end: find its request ID in the logs, open the audit ev
 
 ```
 SPEC.md              requirements, API, research, backlog
+app/auth.py          email+password login, roles, bearer tokens (PBKDF2, stdlib only)
 app/domain.py        stages, modules, errors, context types
 app/service.py       business rules; @mutation writes audit, log and metric
 app/audit.py         hash-chained audit log
 app/observability.py JSON logs, metrics, optional OpenTelemetry
-app/store.py         JSON-file store (SQLite or Postgres is REQ-STORE-01)
+app/store.py         SQLite store (one state table, whole state saved in one transaction)
 app/main.py          FastAPI routes, middleware, static files
 public/              front end
 tests/               test_service.py (stdlib) and test_api.py (FastAPI client)

@@ -1,6 +1,6 @@
 [project]
 name = "saathi"
-version = "0.3.0"
+version = "0.4.0"
 description = "Care-leaver to caregiver pipeline: proof of concept (FastAPI)"
 requires-python = ">=3.11"
 dependencies = ["fastapi>=0.115", "uvicorn>=0.30"]

@@ -177,6 +177,110 @@ class StoreSafety(unittest.TestCase):
             self.assertEqual(again.audit.verify(), {"ok": True, "events": 1, "broken_at": None})
 
 
+class SqliteStore(unittest.TestCase):
+    @covers("REQ-STORE-01")
+    def test_state_and_audit_survive_a_restart_in_sqlite(self):
+        import tempfile, pathlib
+        with tempfile.TemporaryDirectory() as d:
+            p = pathlib.Path(d) / "saathi.sqlite"
+            s = Store(p)
+            service.start_training(s, CTX, "c1")
+            again = Store(p)
+            self.assertEqual(again.db["caregivers"][0]["stage"], "Training")
+            # The state change and its audit event land in the same transaction,
+            # so both survive the restart together.
+            self.assertEqual(again.audit.verify(), {"ok": True, "events": 1, "broken_at": None})
+
+    @covers("REQ-STORE-01")
+    def test_corrupt_sqlite_file_is_not_overwritten(self):
+        import tempfile, pathlib
+        with tempfile.TemporaryDirectory() as d:
+            p = pathlib.Path(d) / "saathi.sqlite"
+            garbage = b"this is not a database at all, just garbage bytes........"
+            p.write_bytes(garbage)
+            with self.assertRaises(RuntimeError):
+                Store(p)
+            self.assertEqual(p.read_bytes(), garbage)
+
+    @covers("REQ-STORE-01")
+    def test_legacy_json_is_imported_once_and_renamed(self):
+        import tempfile, pathlib
+        from app.seed import seed
+        with tempfile.TemporaryDirectory() as d:
+            base = pathlib.Path(d)
+            legacy = base / "db.json"
+            legacy.write_text(json.dumps(seed(), ensure_ascii=False), encoding="utf-8")
+            s = Store(base / "saathi.sqlite")
+            self.assertEqual(len(s.db["caregivers"]), 6)
+            self.assertFalse(legacy.exists())
+            migrated = base / "db.json.migrated"
+            self.assertTrue(migrated.exists())
+            self.assertEqual(json.loads(migrated.read_text(encoding="utf-8"))["seq"], 100)
+            self.assertTrue((base / "saathi.sqlite").exists())
+            again = Store(base / "saathi.sqlite")
+            self.assertEqual(len(again.db["caregivers"]), 6)
+
+
+class AuthAndScoping(unittest.TestCase):
+    @covers("REQ-RBAC-01")
+    def test_create_user_hashes_the_password_and_audits_the_creation(self):
+        from app.auth import verify_password
+        s = make()
+        u = service.create_user(s, CTX, "fam@example.com", "family", "family-pass-1", request_id="r1")
+        self.assertEqual(u, {"email": "fam@example.com", "role": "family", "caregiverId": None, "requestId": "r1"})
+        stored = next(x for x in s.db["users"] if x["email"] == "fam@example.com")
+        self.assertNotIn("family-pass-1", stored["password_hash"])
+        self.assertTrue(verify_password("family-pass-1", stored["password_salt"], stored["password_hash"]))
+        self.assertFalse(verify_password("wrong", stored["password_salt"], stored["password_hash"]))
+        self.assertEqual([(e["action"], e["actor"]) for e in s.db["audit"]], [("user.created", "coordinator")])
+        with self.assertRaises(DomainError) as e:
+            service.create_user(s, CTX, "fam@example.com", "family", "family-pass-1", request_id="r1")
+        self.assertEqual(e.exception.status, 409)
+
+    @covers("REQ-RBAC-01")
+    def test_create_user_rejects_bad_role_link_and_short_password(self):
+        s = make()
+        for args, status in (
+            (("x@example.com", "admin", "password-1"), 400),
+            (("x@example.com", "caregiver", "password-1"), 400),
+            (("x@example.com", "caregiver", "password-1", "nope"), 404),
+            (("x@example.com", "family", "password-1"), 400),
+            (("x@example.com", "family", "short", None, "r1"), 400),
+        ):
+            with self.assertRaises(DomainError) as e:
+                service.create_user(s, CTX, *args)
+            self.assertEqual(e.exception.status, status)
+        self.assertEqual(s.db["audit"], [])
+
+    @covers("REQ-RBAC-01")
+    def test_get_state_is_scoped_by_role(self):
+        s = make()
+        family = {"email": "f@example.com", "role": "family", "caregiverId": None, "requestId": "r1"}
+        state = service.get_state(s, family)
+        self.assertEqual([r["id"] for r in state["requests"]], ["r1"])
+        self.assertEqual([v["id"] for v in state["visits"]], ["v1"])
+        self.assertEqual([c["id"] for c in state["caregivers"]], ["c6"])
+        caregiver = {"email": "c@example.com", "role": "caregiver", "caregiverId": "c6", "requestId": None}
+        state = service.get_state(s, caregiver)
+        self.assertEqual([c["id"] for c in state["caregivers"]], ["c6"])
+        self.assertEqual([r["id"] for r in state["requests"]], ["r1"])
+        self.assertEqual([v["id"] for v in state["visits"]], ["v1"])
+        self.assertTrue(all("dateOfBirth" not in c for c in state["caregivers"]))
+
+    @covers("REQ-RBAC-01")
+    def test_scoped_audit_hides_other_entities_and_strips_date_of_birth(self):
+        s = make()
+        service.start_training(s, CTX, "c1")
+        family = {"email": "f@example.com", "role": "family", "caregiverId": None, "requestId": "r1"}
+        self.assertEqual(service.scoped_audit(s, family), [])
+        caregiver = {"email": "c@example.com", "role": "caregiver", "caregiverId": "c1", "requestId": None}
+        events = service.scoped_audit(s, caregiver)
+        self.assertEqual([e["entity_id"] for e in events], ["c1"])
+        self.assertNotIn("dateOfBirth", json.dumps(events))
+        coordinator = {"email": "coordinator@saathi.local", "role": "coordinator", "caregiverId": None, "requestId": None}
+        self.assertIn("dateOfBirth", json.dumps(service.scoped_audit(s, coordinator)))
+
+
 class AgeGate(unittest.TestCase):
     @covers("REQ-AFT-02")
     def test_exactly_eighteen_is_accepted_and_one_day_short_is_not(self):

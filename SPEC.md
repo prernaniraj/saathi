@@ -2,7 +2,7 @@
 
 Proof of concept for a care-leaver-to-caregiver pipeline. Young adults leaving child care institutions are trained and certified as eldercare companions, matched to families who pay from abroad, and log visit updates the family can read.
 
-Version 0.3. Backend: Python 3.11+ and FastAPI. Front end: plain HTML and ES modules in `public/`.
+Version 0.4. Backend: Python 3.11+ and FastAPI. Front end: plain HTML and ES modules in `public/`.
 
 ## 1. Change rule
 
@@ -25,7 +25,7 @@ Chain of evidence for one change: **request ID in a log line → audit event (sa
 | Care-leaver | Trains, then visits a parent and logs the visit |
 | Family | Submits a request, reads visit updates |
 
-There is no login yet. The actor on an audit event is the `X-Actor` header, which is self-declared until REQ-RBAC-01 is built.
+Login is email and password. Passwords are hashed with PBKDF2-HMAC-SHA256 and a per-user salt; login returns an opaque bearer token (7-day expiry, only its SHA-256 hash is stored). The coordinator has full access; a caregiver sees only their own record, matched requests and own visits and may log visits only for their own matched requests; a family sees only its own request, its visits and its matched caregiver's public info, and may submit a request, which becomes linked to them. The audit actor is the authenticated user's email. The `X-Actor` header is ignored whenever a valid token is present; with no token the request is rejected with 401, except when `SAATHI_DEV_NO_AUTH=1` (local development only), where `X-Actor` is accepted as before. `/healthz`, `/readyz` and `/metrics` stay unauthenticated.
 
 ## 3. Domain
 
@@ -88,10 +88,10 @@ Each item names the research behind it (section 7). Not built.
 | ID | Requirement | Priority | Status |
 | --- | --- | --- | --- |
 | REQ-SAFE-02 | Incident report and escalation workflow, with owner, severity and resolution; a Needs attention visit opens one | P0 | Planned |
-| REQ-RBAC-01 | Login and roles (coordinator, caregiver, family); a family sees only its own parent’s updates; the audit actor comes from the login | P0 | Planned |
+| REQ-RBAC-01 | Login and roles (coordinator, caregiver, family); a family sees only its own parent’s updates; the audit actor comes from the login | P0 | Implemented |
 | REQ-PRIV-01 | Consent and notice for every person whose data is held, a way to withdraw, and retention and erasure rules | P0 | Planned |
 | REQ-PRIV-02 | Breach register with a clock: notify affected people without delay and report to the Board within 72 hours | P0 | Planned |
-| REQ-STORE-01 | Move from a JSON file to SQLite or Postgres, with the audit append in the same transaction as the change | P0 | Planned |
+| REQ-STORE-01 | Move from a JSON file to SQLite or Postgres, with the audit append in the same transaction as the change | P0 | Implemented |
 | REQ-AFT-01 | Record each care-leaver’s sending institution, aftercare eligibility window (18 to 21, extendable to 23), and linked child-protection contacts | P1 | Planned |
 | REQ-AFT-03 | Track identity documents, housing and wellbeing check-ins for each care-leaver | P1 | Planned |
 | REQ-EVV-01 | Visit check-in and check-out with timestamps, and location only with the caregiver’s consent | P1 | Planned |
@@ -107,6 +107,10 @@ Every Planned item, when built, must follow section 1 and add its own audit acti
 
 | Method and path | Requirement |
 | --- | --- |
+| `POST /api/auth/login` {email, password} → {token, user} | REQ-RBAC-01 |
+| `POST /api/auth/logout` | REQ-RBAC-01 |
+| `GET /api/auth/me` | REQ-RBAC-01 |
+| `POST /api/auth/users` (coordinator only) | REQ-RBAC-01 |
 | `GET /api/state` | read-only |
 | `POST /api/caregivers` (name, city, dateOfBirth) | REQ-PIPE-01, REQ-AFT-02 |
 | `POST /api/caregivers/{id}/start` | REQ-PIPE-02 |
@@ -120,6 +124,8 @@ Every Planned item, when built, must follow section 1 and add its own audit acti
 | `GET /api/audit/verify` | REQ-TRC-02 |
 | `GET /healthz`, `GET /readyz`, `GET /metrics` | REQ-OBS-03, REQ-OBS-04 |
 
+All `/api/*` routes except `POST /api/auth/login` require a bearer token (`Authorization: Bearer <token>`); without one they return 401. `/healthz`, `/readyz` and `/metrics` need no login. Write routes are coordinator-only except logging a visit (coordinator, or the matched caregiver for their own request) and submitting a request (coordinator or family). `GET /api/state` and `GET /api/audit` are role-scoped; the audit endpoint strips date of birth from before/after payloads for non-coordinator roles.
+
 Errors are always `{"error": "message"}` with status 400 (invalid input), 404 (not found) or 409 (rule conflict).
 
 ## 6. Observability and audit design
@@ -132,7 +138,7 @@ Errors are always `{"error": "message"}` with status 400 (invalid input), 404 (n
 
 **Alerts to set once deployed.** `/readyz` failing; any increase in `saathi_changes_rejected_total` with status 500; a spike in `saathi_validation_errors_total`.
 
-**Limits.** The hash chain proves history was not edited after the fact; it does not stop someone with file access from rewriting the whole chain. Anchor the latest hash somewhere else (a log sink or a separate store) before real use. The JSON file store is single-process. Date of birth is held in the data file and in audit events, so the audit endpoint exposes it until REQ-RBAC-01 restricts access.
+**Limits.** The hash chain proves history was not edited after the fact; it does not stop someone with file access from rewriting the whole chain. Anchor the latest hash somewhere else (a log sink or a separate store) before real use. The SQLite store is single-process. Date of birth is held in the data file and in audit events; the state API never returns it, and the audit endpoint strips it from before/after payloads for non-coordinator roles (the coordinator still sees it).
 
 ## 7. Research behind the backlog
 
@@ -156,3 +162,11 @@ India data protection
 - Who verifies identity and background checks in India, and what does it cost per person?
 - Does a US-based family need a separate consent for health information about a parent?
 - Where should the audit chain’s latest hash be anchored?
+
+### Design decisions (foundation phase, REQ-STORE-01 and REQ-RBAC-01)
+
+- **SQLite approach.** The store keeps its in-memory dict as the working mirror (same public surface: `store.db`, `store.lock`, `store.audit`, `next_id()`, `save()`), but SQLite is the durable store: one `state(key, value)` table, one row per top-level key, and `save()` writes the whole state — audit events included — in a single transaction, so the audit append lands in the same transaction as the change. Standard library `sqlite3` only; the default data file is `data/saathi.sqlite`. On first boot, a legacy `data/db.json` next to it is imported once and renamed to `db.json.migrated`, never deleted. A corrupt SQLite file raises `RuntimeError` at startup and is never overwritten.
+- **Token approach.** Login is email and password; passwords use PBKDF2-HMAC-SHA256 with a per-user salt (stdlib `hashlib`). Tokens are opaque values from `secrets`, stored server-side only as SHA-256 hashes with a 7-day expiry, in the same SQLite store (`users` and `sessions` tables in the dict mirror). Sessions are auth bookkeeping, not domain changes, so login/logout are not audit-logged; creating an account is a domain change and goes through `@mutation`, so it is audited, logged and counted like any other.
+- **Seed credential handling.** Exactly one coordinator account is seeded: `coordinator@saathi.local`. Its password is `SAATHI_SEED_PASSWORD` when set, otherwise a randomly generated password printed once to stdout at first boot ("Seed coordinator: coordinator@saathi.local / <password> — change after first login"). No fixed password is hardcoded anywhere.
+- **X-Actor fallback rule.** A valid bearer token always wins and `X-Actor` is ignored. With no token the request is rejected with 401, except when `SAATHI_DEV_NO_AUTH=1` (local development only, default off), where `X-Actor` is accepted as the coordinator, as before.
+- **`/metrics` stays unauthenticated**, so Prometheus can scrape it without a login; it exposes counters and timings only, no personal data.
