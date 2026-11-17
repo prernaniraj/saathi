@@ -1,7 +1,7 @@
 """SQLite store with an in-memory dict mirror. Standard library ``sqlite3`` only.
 
 The dict in ``store.db`` is the working mirror (keys caregivers/requests/visits/
-audit/seq/users/sessions) and keeps the public surface existing code and tests
+audit/seq/users/sessions/incidents/consents/breaches/notifications) and keeps the public surface existing code and tests
 rely on. SQLite is the durable store: ``save()`` writes the whole state,
 including audit events, in ONE transaction, so an audit append lands in the
 same transaction as the change that caused it.
@@ -29,7 +29,7 @@ from .seed import seed
 from .trace import implements
 
 STATE_TABLE = "CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
-ALL_KEYS = ("seq", "caregivers", "requests", "visits", "audit", "users", "sessions")
+ALL_KEYS = ("seq", "caregivers", "requests", "visits", "audit", "users", "sessions", "incidents", "consents", "breaches", "notifications")
 
 
 class Store:
@@ -59,7 +59,7 @@ class Store:
 
     def _normalize(self) -> None:
         self.db.setdefault("seq", 100)
-        for key in ("caregivers", "requests", "visits", "audit", "users", "sessions"):
+        for key in ("caregivers", "requests", "visits", "audit", "users", "sessions", "incidents", "consents", "breaches", "notifications"):
             self.db.setdefault(key, [])
 
     def _legacy_json_path(self) -> Path | None:

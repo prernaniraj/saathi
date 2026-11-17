@@ -81,10 +81,23 @@ def get_state(store, user: dict | None = None) -> dict:
     own request, that request's visits, and its matched caregiver's public info.
     """
     with store.lock:
+        # New modules are imported lazily: they import @mutation from here,
+        # so importing them at module level would be circular.
+        from .aftercare import defaults_for
+        from .credentials import verification_stale
+        from .privacy import consent_status_for
+
         data = {k: v for k, v in store.db.items() if k in ("caregivers", "requests", "visits")}
         state = copy.deepcopy({"meta": {"stages": STAGES, "notes": NOTES, "modules": MODULES, "moods": MOODS, "verification": [{"id": k, "label": l} for k, l in VERIFICATION], "verification_statuses": VERIFICATION_STATUSES}, **data})
         for c in state["caregivers"]:
+            defaults_for(c)  # Needs dateOfBirth for the default 21st birthday.
             c.pop("dateOfBirth", None)
+            # A background check whose credential has expired does not change
+            # the verification record; it is surfaced as a flag (REQ-CRED-01).
+            c["verificationStale"] = verification_stale(c)
+            # REQ-PRIV-01: flag consent per care-leaver so a withdrawn (or missing)
+            # consent is visible on the caregiver page.
+            c["consentStatus"] = consent_status_for(store.db, "caregiver", c["id"])
         if user is None or user.get("role") == "coordinator":
             return state
         if user.get("role") == "caregiver":
@@ -94,13 +107,19 @@ def get_state(store, user: dict | None = None) -> dict:
             state["requests"] = [r for r in state["requests"] if r["id"] in request_ids]
             state["visits"] = [v for v in state["visits"] if v.get("caregiverId") == cid]
             return state
-        # Family.
+        # Family. Document reference numbers, housing, wellbeing check-ins and
+        # child-protection contacts are personal to the care-leaver and are
+        # never shown to a family (REQ-AFT-03); the care plan is the parent's
+        # own plan, so it stays on the request.
         rid = user.get("requestId")
         matched = [r for r in state["requests"] if r["id"] == rid]
         caregiver_id = matched[0].get("caregiverId") if matched else None
         state["requests"] = matched
         state["visits"] = [v for v in state["visits"] if v["requestId"] == rid]
         state["caregivers"] = [c for c in state["caregivers"] if c["id"] == caregiver_id] if caregiver_id else []
+        for c in state["caregivers"]:
+            for key in ("documents", "housing", "checkins", "contacts"):
+                c.pop(key, None)
         return state
 
 
@@ -181,6 +200,11 @@ def add_caregiver(store, name: str, city: str, date_of_birth: date, today: date 
     if _age(date_of_birth, today) < MIN_AGE:
         raise DomainError(400, "Care-leavers must be 18 or older.")
     c = {"id": store.next_id("c"), "name": name, "city": city, "dateOfBirth": date_of_birth.isoformat(), "stage": "Applied", "modules": [0] * len(MODULES), "verification": _blank_checks()}
+    # New care-leavers start with the aftercare defaults (window ends on the
+    # 21st birthday). Lazy import: aftercare imports @mutation from here.
+    from .aftercare import defaults_for
+
+    defaults_for(c)
     store.db["caregivers"].append(c)
     return _change(c, None)
 
@@ -235,9 +259,9 @@ def certify(store, caregiver_id: str) -> Change:
     return _change(c, before)
 
 
-@mutation("request.created", "REQ-FAM-01")
-def create_request(store, family: str, parent: str, city: str, visits_per_week: int, need: str) -> Change:
-    r = {"id": store.next_id("r"), "family": family, "parent": parent, "city": city, "visitsPerWeek": visits_per_week, "need": need, "status": "Open", "caregiverId": None}
+@mutation("request.created", "REQ-FAM-01", "REQ-MATCH-02")
+def create_request(store, family: str, parent: str, city: str, visits_per_week: int, need: str, language: str | None = None) -> Change:
+    r = {"id": store.next_id("r"), "family": family, "parent": parent, "city": city, "visitsPerWeek": visits_per_week, "need": need, "language": language, "status": "Open", "caregiverId": None, "matchedAt": None}
     store.db["requests"].append(r)
     return Change("request", r["id"], None, copy.deepcopy(r), copy.deepcopy(r))
 
@@ -254,16 +278,30 @@ def match(store, request_id: str, caregiver_id: str) -> Change:
         raise DomainError(409, "Complete the identity, background and reference checks before matching.")
     before = {"request": copy.deepcopy(r), "caregiver": copy.deepcopy(c)}
     r["status"], r["caregiverId"], c["stage"] = "Matched", c["id"], "Matched"
+    r["matchedAt"] = _today().isoformat()  # Reports count full weeks since this date (REQ-REP-01).
     return Change("request", r["id"], before, {"request": copy.deepcopy(r), "caregiver": copy.deepcopy(c)}, copy.deepcopy(r))
 
 
-@mutation("visit.logged", "REQ-VIS-01")
-def log_visit(store, request_id: str, mood: str, note: str) -> Change:
+@mutation("visit.logged", "REQ-VIS-01", "REQ-EVV-01")
+def log_visit(store, request_id: str, mood: str, note: str, planned_at=None) -> Change:
     r = _find(store, "requests", request_id, "Request")
     if r["status"] != "Matched":
         raise DomainError(409, "Visits can only be logged for matched requests.")
     if mood not in MOODS:
         raise DomainError(400, "Choose how the visit went.")
-    v = {"id": store.next_id("v"), "requestId": r["id"], "caregiverId": r["caregiverId"], "date": datetime.now(timezone.utc).date().isoformat(), "mood": mood, "note": note}
+    v = {"id": store.next_id("v"), "requestId": r["id"], "caregiverId": r["caregiverId"], "date": datetime.now(timezone.utc).date().isoformat(), "mood": mood, "note": note, "plannedAt": _planned_iso(planned_at)}
     store.db["visits"].insert(0, v)
     return Change("visit", v["id"], None, copy.deepcopy(v), copy.deepcopy(v))
+
+
+def _planned_iso(planned_at) -> str:
+    """The planned visit time as an ISO string. Defaults to now, so a visit
+    logged without a planned time is never late (REQ-EVV-01)."""
+    if planned_at is None:
+        return datetime.now(timezone.utc).isoformat()
+    if isinstance(planned_at, datetime):
+        return planned_at.isoformat()
+    try:
+        return datetime.fromisoformat(str(planned_at)).isoformat()
+    except ValueError:
+        raise DomainError(400, "Planned time is not valid.") from None

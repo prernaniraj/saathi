@@ -34,6 +34,9 @@ Login is email and password. Passwords are hashed with PBKDF2-HMAC-SHA256 and a 
 - **Verification checks:** identity, background, references; each Pending, Verified or Failed.
 - **Request status:** Open → Matched.
 - **Visit mood:** Good, Okay, Needs attention.
+- **Incident:** severity Low, Medium, High or Critical; status Open, In progress or Resolved; owner is a coordinator email; a Needs attention visit opens one.
+- **Consent:** per person (a care-leaver, or a parent identified by their family request id); purposes are care matching, visit updates to family and training records; status Granted or Withdrawn; a notice version is recorded.
+- **Breach:** status Open, Notified, Reported or Closed; the Board must be told within 72 hours of discovery.
 
 ## 4. Requirements
 
@@ -66,9 +69,9 @@ Status is Implemented, Partial or Planned. Priority: P0 must have before real us
 | REQ-OBS-02 | Logs are one JSON object per line and always carry request ID and trace ID; each state change logs action, entity, audit sequence, actor and spec refs | P0 | Implemented |
 | REQ-OBS-03 | `/metrics` exposes Prometheus counters for HTTP requests, committed changes, rejected changes and validation errors, and a request-duration histogram | P0 | Implemented |
 | REQ-OBS-04 | `/healthz` reports liveness; `/readyz` returns 503 if the audit chain does not verify | P0 | Implemented |
-| REQ-OBS-05 | When `OTEL_EXPORTER_OTLP_ENDPOINT` is set and the `otel` extra is installed, traces are exported over OTLP and the OpenTelemetry trace ID is used as the trace ID | P1 | Partial |
+| REQ-OBS-05 | When `OTEL_EXPORTER_OTLP_ENDPOINT` is set and the `otel` extra is installed, traces are exported over OTLP and the OpenTelemetry trace ID is used as the trace ID | P1 | Implemented |
 
-REQ-OBS-05 is written but has not been run end to end.
+REQ-OBS-05 was verified end to end against a dummy OTLP/HTTP receiver (`tests/test_otel.py`): a POST to `/v1/traces` arrives carrying spans for the requests made, and the trace ID in the log lines is the OpenTelemetry trace ID.
 
 ### 4.4 Traceability
 
@@ -87,19 +90,19 @@ Each item names the research behind it (section 7). Not built.
 
 | ID | Requirement | Priority | Status |
 | --- | --- | --- | --- |
-| REQ-SAFE-02 | Incident report and escalation workflow, with owner, severity and resolution; a Needs attention visit opens one | P0 | Planned |
+| REQ-SAFE-02 | Incident report and escalation workflow, with owner, severity and resolution; a Needs attention visit opens one | P0 | Implemented |
 | REQ-RBAC-01 | Login and roles (coordinator, caregiver, family); a family sees only its own parent’s updates; the audit actor comes from the login | P0 | Implemented |
-| REQ-PRIV-01 | Consent and notice for every person whose data is held, a way to withdraw, and retention and erasure rules | P0 | Planned |
-| REQ-PRIV-02 | Breach register with a clock: notify affected people without delay and report to the Board within 72 hours | P0 | Planned |
+| REQ-PRIV-01 | Consent and notice for every person whose data is held, a way to withdraw, and retention and erasure rules | P0 | Implemented |
+| REQ-PRIV-02 | Breach register with a clock: notify affected people without delay and report to the Board within 72 hours | P0 | Implemented |
 | REQ-STORE-01 | Move from a JSON file to SQLite or Postgres, with the audit append in the same transaction as the change | P0 | Implemented |
-| REQ-AFT-01 | Record each care-leaver’s sending institution, aftercare eligibility window (18 to 21, extendable to 23), and linked child-protection contacts | P1 | Planned |
-| REQ-AFT-03 | Track identity documents, housing and wellbeing check-ins for each care-leaver | P1 | Planned |
-| REQ-EVV-01 | Visit check-in and check-out with timestamps, and location only with the caregiver’s consent | P1 | Planned |
-| REQ-CRED-01 | Credential and background-check expiry with alerts | P1 | Planned |
-| REQ-PLAN-01 | Care plan per parent and a task checklist per visit, visible to the caregiver before arrival | P1 | Planned |
-| REQ-NOTIF-01 | Notify the coordinator and family on Needs attention visits, late arrivals and missed visits | P1 | Planned |
-| REQ-MATCH-02 | Match on language, availability and visit frequency, not only city | P2 | Planned |
-| REQ-REP-01 | Reports: visit completion, punctuality, flagged visits, retention and placement rate | P2 | Planned |
+| REQ-AFT-01 | Record each care-leaver’s sending institution, aftercare eligibility window (18 to 21, extendable to 23), and linked child-protection contacts | P1 | Implemented |
+| REQ-AFT-03 | Track identity documents, housing and wellbeing check-ins for each care-leaver | P1 | Implemented |
+| REQ-EVV-01 | Visit check-in and check-out with timestamps, and location only with the caregiver’s consent | P1 | Implemented |
+| REQ-CRED-01 | Credential and background-check expiry with alerts | P1 | Implemented |
+| REQ-PLAN-01 | Care plan per parent and a task checklist per visit, visible to the caregiver before arrival | P1 | Implemented |
+| REQ-NOTIF-01 | Notify the coordinator and family on Needs attention visits, late arrivals and missed visits | P1 | Implemented |
+| REQ-MATCH-02 | Match on language, availability and visit frequency, not only city | P2 | Implemented |
+| REQ-REP-01 | Reports: visit completion, punctuality, flagged visits, retention and placement rate | P2 | Implemented |
 
 Every Planned item, when built, must follow section 1 and add its own audit actions, metrics and tests.
 
@@ -113,13 +116,43 @@ Every Planned item, when built, must follow section 1 and add its own audit acti
 | `POST /api/auth/users` (coordinator only) | REQ-RBAC-01 |
 | `GET /api/state` | read-only |
 | `POST /api/caregivers` (name, city, dateOfBirth) | REQ-PIPE-01, REQ-AFT-02 |
+| `POST /api/caregivers/{id}/aftercare` (institution, aftercareUntil, extended, contacts, locationConsent; coordinator only) | REQ-AFT-01 |
+| `POST /api/caregivers/{id}/documents` (type, reference, status; coordinator only) | REQ-AFT-03 |
+| `POST /api/caregivers/{id}/housing` (status, details; coordinator only) | REQ-AFT-03 |
+| `POST /api/caregivers/{id}/checkins` (note, date; coordinator, or the caregiver themself) | REQ-AFT-03 |
+| `POST /api/caregivers/{id}/credentials` (type, issuedDate, expiryDate; coordinator only) | REQ-CRED-01 |
+| `GET /api/credentials/expiring?days=30` (coordinator only) | REQ-CRED-01 |
+| `POST /api/caregivers/{id}/profile` (languages, availability, capacityVisitsPerWeek; coordinator only) | REQ-MATCH-02 |
 | `POST /api/caregivers/{id}/start` | REQ-PIPE-02 |
 | `POST /api/caregivers/{id}/modules/{index}` | REQ-PIPE-03 |
 | `POST /api/caregivers/{id}/certify` | REQ-PIPE-04 |
 | `POST /api/caregivers/{id}/verification/{item}` (status) | REQ-SAFE-01 |
-| `POST /api/requests` | REQ-FAM-01 |
+| `POST /api/requests` (optional `language`) | REQ-FAM-01, REQ-MATCH-02 |
 | `POST /api/requests/{id}/match` | REQ-MATCH-01 |
-| `POST /api/visits` | REQ-VIS-01 |
+| `GET /api/requests/{id}/suggestions` (coordinator only) | REQ-MATCH-02 |
+| `GET /api/requests/{id}/care-plan` (coordinator, matched caregiver, or the family) | REQ-PLAN-01 |
+| `POST /api/requests/{id}/care-plan` (goals; coordinator only) | REQ-PLAN-01 |
+| `POST /api/requests/{id}/care-plan/tasks` (title; coordinator only) | REQ-PLAN-01 |
+| `POST /api/requests/{id}/care-plan/tasks/{taskId}/toggle` (coordinator or matched caregiver) | REQ-PLAN-01 |
+| `POST /api/visits` (optional `plannedAt`) | REQ-VIS-01, REQ-EVV-01 |
+| `POST /api/visits/{id}/checkin` (timestamp, location; caregiver who owns the visit, or coordinator) | REQ-EVV-01 |
+| `POST /api/visits/{id}/checkout` (timestamp, location; caregiver who owns the visit, or coordinator) | REQ-EVV-01 |
+| `GET /api/notifications` (role-scoped) | REQ-NOTIF-01 |
+| `POST /api/notifications/{id}/read` | REQ-NOTIF-01 |
+| `POST /api/notifications/check-missed` (coordinator only; runs the missed-visit check) | REQ-NOTIF-01 |
+| `GET /api/reports/summary` (coordinator only) | REQ-REP-01 |
+| `GET /api/incidents` (role-scoped) | REQ-SAFE-02 |
+| `POST /api/incidents` (coordinator only) | REQ-SAFE-02 |
+| `POST /api/incidents/{id}/assign` {owner} (coordinator only) | REQ-SAFE-02 |
+| `POST /api/incidents/{id}/resolve` {resolution} (coordinator only) | REQ-SAFE-02 |
+| `GET /api/consents` (role-scoped) | REQ-PRIV-01 |
+| `POST /api/consents` (coordinator only) | REQ-PRIV-01 |
+| `POST /api/consents/{id}/withdraw` (coordinator only) | REQ-PRIV-01 |
+| `POST /api/caregivers/{id}/erase` (coordinator only) | REQ-PRIV-01 |
+| `GET /api/breaches` (coordinator only) | REQ-PRIV-02 |
+| `POST /api/breaches` (coordinator only) | REQ-PRIV-02 |
+| `POST /api/breaches/{id}/notify` (coordinator only) | REQ-PRIV-02 |
+| `POST /api/breaches/{id}/report` (coordinator only) | REQ-PRIV-02 |
 | `GET /api/audit?entity_id=&action=&limit=` | REQ-TRC-03 |
 | `GET /api/audit/verify` | REQ-TRC-02 |
 | `GET /healthz`, `GET /readyz`, `GET /metrics` | REQ-OBS-03, REQ-OBS-04 |
@@ -156,12 +189,30 @@ Home care software
 India data protection
 - The DPDP Rules were notified on 13 November 2025. Consent-manager registration opens 13 November 2026 and the main obligations apply from 13 May 2027. A breach needs notice to affected people without delay and a detailed report to the Data Protection Board within 72 hours. [iPleaders](https://blog.ipleaders.in/dpdp-rules-2025-operational-compliance-guide/), [Mondaq](https://www.mondaq.com/india/data-protection/1844066/dpdp-data-breach-notification-in-india-timelines-requirements-and-key-compliance-considerations)
 
+### Design decisions (P1/P2 wave: REQ-AFT-01, REQ-AFT-03, REQ-EVV-01, REQ-CRED-01, REQ-PLAN-01, REQ-NOTIF-01, REQ-MATCH-02, REQ-REP-01)
+
+- **New modules.** `app/aftercare.py` (AFT-01, AFT-03), `app/evv.py` (EVV-01), `app/credentials.py` (CRED-01), `app/careplans.py` (PLAN-01), `app/notifications.py` (NOTIF-01), `app/matching.py` (MATCH-02), `app/reports.py` (REP-01). New store key `db["notifications"]`; care plans live on the request dict as `carePlan`; credentials, documents, housing and check-ins live on the caregiver dict. Seed data covers all of it (languages/availability/capacity on every seed caregiver, a care plan for r1, credential expiry dates, one wellbeing check-in for c6).
+- **Aftercare window (AFT-01).** The default `aftercareUntil` is the 21st birthday, computed from the date of birth; `extended: true` records an extension to the 23rd birthday (seed c5 is the extended example). The 23-year cap is NOT enforced in code: the date and the flag are stored as the coordinator records them, because the extension decision sits with the aftercare programme, not this system. `locationConsent` is set through the same aftercare endpoint because it is a consent the coordinator records with the aftercare record.
+- **Privacy of aftercare records (AFT-03).** Document reference numbers, housing, wellbeing check-ins and child-protection contacts are visible only to the coordinator and to the caregiver themself. The family-scoped `get_state` strips all four from the matched caregiver's record. Credentials (type, issued/expiry dates, status — no reference numbers) stay visible to the family.
+- **EVV (EVV-01).** Check-in/check-out store `checkinAt`/`checkoutAt` and, when consented, `checkinLocation`/`checkoutLocation`. A location sent without consent returns 400 and stores nothing — the check is made before any state change. `plannedAt` is optional on visit creation and defaults to the moment the visit was logged, so a visit logged without a planned time is never late. Late means a check-in more than 30 minutes after `plannedAt`.
+- **Credentials (CRED-01).** Credential status is computed at creation from the expiry date ("Valid"/"Expired"). The expiring list (`expiring_credentials`, `GET /api/credentials/expiring?days=30`) includes already-expired credentials (negative `daysLeft`), sorted soonest first, so an expired background check never drops silently out of the alert list. An expired "Background check" credential does NOT change the caregiver's verification status: it is surfaced as a `verificationStale` flag in `get_state` and in the expiring list, and re-verification stays a deliberate coordinator action.
+- **Care plans (PLAN-01).** The plan is `{goals, tasks: [{id, title, done}]}` on the request, so it is visible wherever the request is visible: the matched caregiver and the family see it in `get_state` and through `GET /api/requests/{id}/care-plan`. Adding the first task creates an empty plan (goals blank) so the checklist exists before the goals are written. Task toggle is allowed for the coordinator and the matched caregiver.
+- **Notifications (NOTIF-01).** In-app only, plus structured log lines: there is no email/SMS provider, and choosing a real delivery channel is an open decision. Audience is `{role: "coordinator"}`, `{role: "family", requestId}` or `{role: "caregiver", caregiverId}`. `notify_for_visit` (Needs attention) and `check_missed_visits` are standalone `@mutation` helpers that the coordinator wires in after `log_visit` / on a schedule during the merge; `log_visit` and `match` were deliberately not modified. A late check-in creates its late notification inside the check-in mutation, so the check-in's own audit event covers it. Missed visits: for each Matched request the expected interval is 7 / visitsPerWeek days since the last logged visit; a request with no visit logged yet has no baseline and is skipped. A second missed-visit notification for the same request is not created while an unread one exists. `POST /api/notifications/check-missed` (coordinator) runs the check on demand, since there is no scheduler yet.
+- **Matching (MATCH-02).** Suggestions rank Certified + fully-verified caregivers only. Score out of 100: city 30, language 25, availability 25, capacity 20. Availability is scored on the number of days free a week against the visits a week the request needs — the request does not name days, so day-of-week overlap cannot be scored yet. A request with no language preference gives every candidate the language points. A caregiver with no capacity recorded scores 0 on capacity and the breakdown says so, rather than assuming they can take the visits. `POST /api/requests/{id}/match` is unchanged.
+- **Reports (REP-01).** `GET /api/reports/summary` is read-only (coordinator). Definitions: visit completion = visits logged vs expected, where expected per Matched request is visitsPerWeek × full weeks since `matchedAt` (set when the match is made; a request matched less than a week ago expects 0, so the rate is null until there is something to compare against). Punctuality = share of visits with both check-in and check-out, and share of checked-in visits that were late per the EVV 30-minute rule. Flagged visits = count of "Needs attention". Retention = of caregivers who have ever been matched, the share still in the Matched stage; "ever matched" is caregivers currently Matched, plus any caregiver linked to a Matched request, plus any caregiver named in a `request.matched` audit event. Placement rate = Matched requests / all requests.
+- **The `@mutation` wrapper consumes `ctx`.** New mutation functions are written without a `ctx` parameter (like the existing ones in `app/service.py`): callers pass `(store, ctx, ...)` and the wrapper keeps `ctx` for the audit event and log line. New modules import `@mutation` from `app.service`; `app/service.py` imports the new modules only lazily inside `get_state`, to avoid a circular import.
+
 ## 8. Open questions
 
 - Which state aftercare programme or institution will be the first referral partner?
 - Who verifies identity and background checks in India, and what does it cost per person?
 - Does a US-based family need a separate consent for health information about a parent?
 - Where should the audit chain’s latest hash be anchored?
+- How should a full erasure handle earlier audit events that still hold the erased person's name, given the hash chain cannot be rewritten?
+- Which channel should deliver notifications to the coordinator and the family (email, SMS, WhatsApp)? In-app only for now.
+- Who runs the missed-visit check on a schedule, and how often? `POST /api/notifications/check-missed` is on demand for now.
+- Should a family request name the days of the week it needs, so matching can score day-of-week overlap instead of just the number of free days?
+- Should the system enforce the aftercare extension cap (no later than the 23rd birthday), or keep trusting the coordinator's record?
 
 ### Design decisions (foundation phase, REQ-STORE-01 and REQ-RBAC-01)
 
@@ -170,3 +221,12 @@ India data protection
 - **Seed credential handling.** Exactly one coordinator account is seeded: `coordinator@saathi.local`. Its password is `SAATHI_SEED_PASSWORD` when set, otherwise a randomly generated password printed once to stdout at first boot ("Seed coordinator: coordinator@saathi.local / <password> — change after first login"). No fixed password is hardcoded anywhere.
 - **X-Actor fallback rule.** A valid bearer token always wins and `X-Actor` is ignored. With no token the request is rejected with 401, except when `SAATHI_DEV_NO_AUTH=1` (local development only, default off), where `X-Actor` is accepted as the coordinator, as before.
 - **`/metrics` stays unauthenticated**, so Prometheus can scrape it without a login; it exposes counters and timings only, no personal data.
+
+### Design decisions (safety and privacy, REQ-SAFE-02, REQ-PRIV-01, REQ-PRIV-02)
+
+- **Incidents (`app/incidents.py`).** `open_for_visit(store, ctx, visit)` opens an incident only for a visit whose mood is "Needs attention" (any other mood is a 409, so the helper can be called unconditionally after logging a visit); one visit can open at most one incident (a second call is a 409). An automatically opened incident has severity Medium and no owner — a coordinator assigns one. Assigning requires the owner to be an existing coordinator account and moves Open to In progress; resolving needs a non-empty resolution and stamps `resolvedAt`. The helper is wired into the visit flow in `app/main.py` (`_escalate_visit`, called after `log_visit` commits), so a visit can never fail because of incident handling: a failure in the escalation is logged with the request ID and the visit still succeeds. Reads are role-scoped like the state API: a caregiver sees incidents about their own visits, a family sees incidents about its own request.
+- **Consent (`app/privacy.py`).** One active (Granted) consent per person; granting again is a 409 until the old one is withdrawn, and withdrawing then re-granting creates a new record, so the history is kept. A parent is identified by their family request id, since parents have no separate id. Purposes are a closed list: care matching, visit updates to family, training records. The notice version recorded is "1". Withdrawal is coordinator-only in this POC: the person concerned asks the coordinator to withdraw it — a self-service withdrawal is a later step, not a silent default. The pipeline is NOT blocked on missing consent in this POC: a care-leaver with no consent can still be trained, certified and matched. Instead it is surfaced — `GET /api/state` carries `consentStatus` (Granted, Withdrawn or None) on every caregiver, and the Pipeline page flags a withdrawn or missing consent and lets the coordinator record or withdraw it.
+- **Retention rule.** Erase a person's data on request, without delay. In addition, once a year (each January) the coordinator reviews records with no activity for 12 months and erases them, unless there is a live match or an open incident or breach involving that person. That review is a manual process in this POC; no automatic deletion runs.
+- **Erasure.** Name and city become "[erased]", date of birth is removed, and `erased`/`erasedAt` are set; id, stage, modules and verification are kept so requests, visits and the audit chain still refer to the record, and any granted consent for the person is withdrawn as part of the same change. The erasure audit event's before/after payloads are built from the redacted copy only, so the erased personal data never enters the audit log through that event. Known limit: earlier audit events (for example the original `caregiver.created`) still hold the name, because the hash chain cannot be rewritten without breaking verification. A full erasure that also rewrites history is an open question, not something this POC does silently.
+- **Seed consent is assumed demo data.** The seed grants consent for the six seed care-leavers and the three seed parents so the consent flag shows as granted in the sample data. That is not real consent and must be replaced by recorded consent before any real person's data is used.
+- **Breach register (`app/breach.py`).** `boardDueAt = discoveredAt + 72h`; the read view computes `overdue` (now past the due time while `boardReportedAt` is empty) and `hoursRemaining` at read time, so the countdown is always current. The order is fixed: notify the affected people first, then report to the Board — reporting an Open breach is a 409. `affectedPersonIds` are validated against care-leaver and request ids. Status Closed is reserved for a future close step; there is no close endpoint yet.

@@ -11,6 +11,7 @@ python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 python -m app                 # http://127.0.0.1:3000  (PORT=4000 to change)
 pytest                        # all tests, needs the dev extras
+pytest tests/test_otel.py     # OpenTelemetry export test, needs the otel extra too
 python -m unittest tests.test_service   # rule, audit and metrics tests, no installs
 python scripts/trace_matrix.py          # rebuilds docs/TRACEABILITY.md, exits 1 on gaps
 ```
@@ -27,7 +28,7 @@ Local development only: with `SAATHI_DEV_NO_AUTH=1`, API calls without a token a
 
 ## Pages
 
-Dashboard `/`, Pipeline, Family requests, Visit log, Family view, and Audit (change history with a chain check).
+Dashboard `/`, Pipeline, Family requests, Visit log, Family view, Incidents, Breach register, Notifications, Reports, and Audit (change history with a chain check).
 
 ## Observability and traceability
 
@@ -50,12 +51,22 @@ SPEC.md              requirements, API, research, backlog
 app/auth.py          email+password login, roles, bearer tokens (PBKDF2, stdlib only)
 app/domain.py        stages, modules, errors, context types
 app/service.py       business rules; @mutation writes audit, log and metric
+app/aftercare.py     sending institution, aftercare window, documents, housing, check-ins
+app/evv.py           visit check-in and check-out, location only with consent
+app/credentials.py   credential expiry, expiring list, stale background-check flag
+app/careplans.py     care plan per request with a task checklist
+app/notifications.py in-app notifications: Needs attention, late, missed visits
+app/matching.py      match suggestions on city, language, availability, frequency
+app/reports.py       visit completion, punctuality, flagged visits, retention, placement
+app/incidents.py     incident reports and escalation (REQ-SAFE-02)
+app/privacy.py       consent, notice, retention and erasure (REQ-PRIV-01)
+app/breach.py        breach register with the 72-hour clock (REQ-PRIV-02)
 app/audit.py         hash-chained audit log
 app/observability.py JSON logs, metrics, optional OpenTelemetry
 app/store.py         SQLite store (one state table, whole state saved in one transaction)
 app/main.py          FastAPI routes, middleware, static files
 public/              front end
-tests/               test_service.py (stdlib) and test_api.py (FastAPI client)
+tests/               test_service.py (stdlib) and test_api.py (FastAPI client), test_p1_p2.py (P1/P2 features), test_safety_privacy.py (P0 safety/privacy), test_visit_hooks.py (visit escalation wiring)
 scripts/trace_matrix.py   traceability check
 docs/TRACEABILITY.md      generated matrix
 ```

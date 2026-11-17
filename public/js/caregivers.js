@@ -1,6 +1,23 @@
 import { $, esc, api, getState, run, say, shell } from './common.js';
 shell();
+const user = JSON.parse(sessionStorage.getItem('saathi_user') || 'null');
 let S;
+let consents = [];
+const consentFor = (id) => consents.find((c) => c.personType === 'caregiver' && c.personId === id && c.status === 'Granted');
+// REQ-PRIV-01: consent is surfaced, not blocking — a withdrawn or missing
+// consent is flagged here so the coordinator sees it before matching.
+const consentLine = (c) => {
+  const st = c.consentStatus || 'None';
+  const label = st === 'Granted' ? '<span class="mute">Consent: Granted</span>'
+    : st === 'Withdrawn' ? '<span class="flag">Consent withdrawn</span>'
+    : '<span class="flag">No consent recorded</span>';
+  if (user?.role !== 'coordinator') return `<p>${label}</p>`;
+  const granted = consentFor(c.id);
+  const action = granted
+    ? `<button class="chip" data-a="consent-withdraw" data-id="${granted.id}">Withdraw consent</button>`
+    : `<button class="chip" data-a="consent-grant" data-id="${c.id}">Record consent</button>`;
+  return `<p>${label} ${action}</p>`;
+};
 const NEXT = { Pending: 'Verified', Verified: 'Failed', Failed: 'Pending' };
 const cleared = (c) => S.meta.verification.every((v) => c.verification?.[v.id]?.status === 'Verified');
 const checks = (c) => `<p class="mute">Checks (tap to change)</p><div class="chips">${S.meta.verification.map((v) => {
@@ -19,14 +36,16 @@ const detail = (c) => {
 };
 function render() {
   $('#app').innerHTML = `<div class="cols">${S.meta.stages.map((st, i) => `<div><h3>${st}</h3><p class="mute">${S.meta.notes[i]}</p>${
-    S.caregivers.filter((c) => c.stage === st).map((c) => `<div class="card"><strong>${esc(c.name)}</strong> <span class="mute">${esc(c.city)}</span>${detail(c)}</div>`).join('') || '<p class="mute">No one here yet.</p>'}</div>`).join('')}</div>`;
+    S.caregivers.filter((c) => c.stage === st).map((c) => `<div class="card"><strong>${esc(c.name)}</strong> <span class="mute">${esc(c.city)}</span>${consentLine(c)}${detail(c)}</div>`).join('') || '<p class="mute">No one here yet.</p>'}</div>`).join('')}</div>`;
 }
-const refresh = async () => { S = await getState(); render(); };
+const refresh = async () => { S = await getState(); consents = await api('/api/consents').catch(() => []); render(); };
 $('#app').addEventListener('click', (e) => {
   const b = e.target.closest('[data-a]'); if (!b) return;
   const { a, id, i, item, status } = b.dataset;
   run(async () => {
     if (a === 'verify') await api(`/api/caregivers/${id}/verification/${item}`, 'POST', { status });
+    else if (a === 'consent-grant') await api('/api/consents', 'POST', { personType: 'caregiver', personId: id, purposes: ['care matching', 'visit updates to family'] });
+    else if (a === 'consent-withdraw') await api(`/api/consents/${id}/withdraw`, 'POST');
     else await api(`/api/caregivers/${id}/${a === 'mod' ? 'modules/' + i : a}`, 'POST');
     await refresh();
   });

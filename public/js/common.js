@@ -29,7 +29,7 @@ export async function run(fn, okMessage) {
   try { await fn(); if (okMessage) say(okMessage); } catch (e) { say(e.message, true); }
 }
 
-const PAGES = [['', 'Dashboard'], ['caregivers.html', 'Pipeline'], ['requests.html', 'Family requests'], ['visits.html', 'Visit log'], ['family.html', 'Family view'], ['audit.html', 'Audit']];
+const PAGES = [['', 'Dashboard'], ['caregivers.html', 'Pipeline'], ['requests.html', 'Family requests'], ['visits.html', 'Visit log'], ['family.html', 'Family view'], ['incidents.html', 'Incidents'], ['breaches.html', 'Breach register'], ['notifications.html', 'Notifications'], ['reports.html', 'Reports'], ['audit.html', 'Audit']];
 export function shell() {
   const here = location.pathname.split('/').pop();
   const user = JSON.parse(sessionStorage.getItem('saathi_user') || 'null');

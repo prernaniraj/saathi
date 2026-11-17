@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Breach register | Saathi</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;600&family=Newsreader:wght@500;600&display=swap">
+<link rel="stylesheet" href="/css/app.css">
+</head>
+<body>
+<div class="wrap">
+<div id="shell"></div>
+<h2>Breach register</h2>
+<p class="mute">Coordinator only. Affected people must be notified without delay, and the Board within 72 hours of discovery — the countdown on each breach shows how long is left.</p>
+<form id="f">
+  <label>Title
+    <input name="title" required>
+  </label>
+  <label>Affected people (caregiver or request ids, comma separated)
+    <input name="affectedPersonIds" placeholder="c6, r1">
+  </label>
+  <label>Description
+    <textarea name="description" required></textarea>
+  </label>
+  <button class="btn" type="submit">Record a breach</button>
+</form>
+<main id="app"></main>
+<p class="mute" id="live" aria-live="polite"></p>
+</div>
+<script type="module" src="/js/breaches.js"></script>
+</body>
+</html>

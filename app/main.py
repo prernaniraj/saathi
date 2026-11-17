@@ -4,7 +4,8 @@ import re
 import time
 import uuid
 from pathlib import Path
-from datetime import date
+from datetime import date, datetime
+from datetime import date as _date  # Alias: a model field is itself named `date` below.
 from typing import Annotated, Literal
 
 from fastapi import Depends, FastAPI, Query, Request
@@ -13,7 +14,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, StringConstraints
 
-from . import auth, service
+from . import aftercare, auth, breach, careplans, credentials, evv, incidents, matching, notifications, privacy, reports, service
 from .domain import Ctx, DomainError
 from .observability import event, metrics, otel_trace_id, request_id_var, setup_logging, setup_tracing, trace_id_var
 from .store import Store
@@ -21,7 +22,8 @@ from .trace import implements
 
 ROOT = Path(__file__).resolve().parent.parent
 Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
-LABELS = {"dateOfBirth": "Date of birth", "status": "Status", "visitsPerWeek": "Visits per week", "requestId": "Family", "caregiverId": "Caregiver", "name": "Name", "city": "City", "family": "Family name", "parent": "Parent’s name", "note": "Note", "mood": "Mood", "need": "Need", "email": "Email", "password": "Password", "role": "Role"}
+LongText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=1000)]
+LABELS = {"dateOfBirth": "Date of birth", "status": "Status", "visitsPerWeek": "Visits per week", "requestId": "Family", "caregiverId": "Caregiver", "name": "Name", "city": "City", "family": "Family name", "parent": "Parent’s name", "note": "Note", "mood": "Mood", "need": "Need", "email": "Email", "password": "Password", "role": "Role", "institution": "Institution", "aftercareUntil": "Aftercare until", "contacts": "Contacts", "type": "Type", "reference": "Reference", "details": "Details", "language": "Language", "plannedAt": "Planned time", "timestamp": "Timestamp", "location": "Location", "goals": "Goals", "title": "Title", "languages": "Languages", "availability": "Availability", "capacityVisitsPerWeek": "Capacity", "issuedDate": "Issued date", "expiryDate": "Expiry date", "phone": "Phone", "days": "Days", "hours": "Hours", "severity": "Severity", "description": "Description", "owner": "Owner", "resolution": "Resolution", "personType": "Person type", "personId": "Person", "purposes": "Purposes", "affectedPersonIds": "Affected people", "discoveredAt": "Discovered at", "visitId": "Visit"}
 
 
 class CaregiverIn(BaseModel):
@@ -40,6 +42,7 @@ class RequestIn(BaseModel):
     city: Text
     visitsPerWeek: int = Field(ge=1, le=7)
     need: Text
+    language: str | None = None
 
 
 class MatchIn(BaseModel):
@@ -50,6 +53,95 @@ class VisitIn(BaseModel):
     requestId: str
     mood: Literal["Good", "Okay", "Needs attention"]
     note: Text
+    plannedAt: datetime | None = None
+
+
+class ContactIn(BaseModel):
+    name: Text
+    role: Text
+    phone: Text
+
+
+class AftercareIn(BaseModel):
+    institution: str | None = None
+    aftercareUntil: date | None = None
+    extended: bool | None = None
+    contacts: list[ContactIn] | None = None
+    locationConsent: bool | None = None
+
+
+class DocumentIn(BaseModel):
+    type: Text
+    reference: Text
+    status: Literal["Pending", "Verified", "Rejected"] = "Pending"
+
+
+class HousingIn(BaseModel):
+    status: Literal["Stable", "Temporary", "At risk", "Unknown"]
+    details: str | None = None
+
+
+class CheckinNoteIn(BaseModel):
+    note: Text
+    date: _date | None = None
+
+
+class CredentialIn(BaseModel):
+    type: Text
+    issuedDate: date | None = None
+    expiryDate: date
+
+
+class AvailabilityIn(BaseModel):
+    days: list[str]
+    hours: str
+
+
+class ProfileIn(BaseModel):
+    languages: list[str] | None = None
+    availability: AvailabilityIn | None = None
+    capacityVisitsPerWeek: int | None = Field(default=None, ge=0, le=21)
+
+
+class CheckInOut(BaseModel):
+    timestamp: datetime | None = None
+    location: str | None = None
+
+
+class CarePlanIn(BaseModel):
+    goals: LongText
+
+
+class TaskIn(BaseModel):
+    title: Text
+
+
+class IncidentIn(BaseModel):
+    requestId: str
+    visitId: str | None = None
+    severity: Literal["Low", "Medium", "High", "Critical"]
+    description: Text
+
+
+class AssignIn(BaseModel):
+    owner: Text
+
+
+class ResolveIn(BaseModel):
+    resolution: Text
+
+
+class ConsentIn(BaseModel):
+    personType: Literal["caregiver", "parent"]
+    personId: Text
+    purposes: list[str]
+
+
+class BreachIn(BaseModel):
+    title: Text
+    description: Text
+    affectedPersonIds: list[str] = []
+    discoveredAt: str | None = None
 
 
 class LoginIn(BaseModel):
@@ -217,7 +309,7 @@ def create_app(data_file: str | Path | None = None, public_dir: str | Path | Non
     @app.post("/api/requests", status_code=201)
     def create_request(body: RequestIn, ctx: C, user: U):
         require_role(user, "coordinator", "family")
-        result = service.create_request(store, ctx, body.family, body.parent, body.city, body.visitsPerWeek, body.need)
+        result = service.create_request(store, ctx, body.family, body.parent, body.city, body.visitsPerWeek, body.need, language=(body.language or "").strip() or None)
         if user["role"] == "family":
             # The request a family submits becomes the one linked to them.
             with store.lock:
@@ -232,6 +324,19 @@ def create_app(data_file: str | Path | None = None, public_dir: str | Path | Non
         require_role(user, "coordinator")
         return service.match(store, ctx, request_id, body.caregiverId)
 
+    def _escalate_visit(store, ctx: Ctx, visit: dict) -> None:
+        """Open the incident and send the notifications for a visit flagged
+        "Needs attention" (REQ-SAFE-02, REQ-NOTIF-01). This runs after the
+        visit itself is committed, and a failure here must never fail the
+        visit: problems are logged with the request ID instead."""
+        for fn in (incidents.open_for_visit, notifications.notify_for_visit):
+            try:
+                fn(store, ctx, visit)
+            except DomainError as e:
+                event(logging.WARNING, "visit escalation skipped", reason=e.message, visit_id=visit.get("id"))
+            except Exception:
+                logging.getLogger("saathi").exception("visit escalation failed")
+
     @app.post("/api/visits", status_code=201)
     def log_visit(body: VisitIn, ctx: C, user: U):
         if user["role"] == "family":
@@ -241,7 +346,232 @@ def create_app(data_file: str | Path | None = None, public_dir: str | Path | Non
                 req = next((r for r in store.db["requests"] if r["id"] == body.requestId), None)
             if req is not None and req.get("caregiverId") != user.get("caregiverId"):
                 raise DomainError(403, "Visits can only be logged for your own matched requests.")
-        return service.log_visit(store, ctx, body.requestId, body.mood, body.note)
+        result = service.log_visit(store, ctx, body.requestId, body.mood, body.note, planned_at=body.plannedAt.isoformat() if body.plannedAt else None)
+        if body.mood == "Needs attention":
+            _escalate_visit(store, ctx, result)
+        return result
+
+    # --- Aftercare (REQ-AFT-01, REQ-AFT-03) ---
+    @app.post("/api/caregivers/{caregiver_id}/aftercare")
+    @implements("REQ-AFT-01")
+    def set_aftercare(caregiver_id: str, body: AftercareIn, ctx: C, user: U):
+        require_role(user, "coordinator")
+        return aftercare.set_aftercare(store, ctx, caregiver_id, institution=body.institution, aftercare_until=body.aftercareUntil, extended=body.extended, contacts=[c.model_dump() for c in body.contacts] if body.contacts is not None else None, location_consent=body.locationConsent)
+
+    @app.post("/api/caregivers/{caregiver_id}/documents", status_code=201)
+    @implements("REQ-AFT-03")
+    def add_document(caregiver_id: str, body: DocumentIn, ctx: C, user: U):
+        require_role(user, "coordinator")
+        return aftercare.add_document(store, ctx, caregiver_id, body.type, body.reference, body.status)
+
+    @app.post("/api/caregivers/{caregiver_id}/housing")
+    @implements("REQ-AFT-03")
+    def set_housing(caregiver_id: str, body: HousingIn, ctx: C, user: U):
+        require_role(user, "coordinator")
+        return aftercare.set_housing(store, ctx, caregiver_id, body.status, body.details)
+
+    @app.post("/api/caregivers/{caregiver_id}/checkins", status_code=201)
+    @implements("REQ-AFT-03")
+    def add_checkin(caregiver_id: str, body: CheckinNoteIn, ctx: C, user: U):
+        if user["role"] == "caregiver" and user.get("caregiverId") != caregiver_id:
+            raise DomainError(403, "Check-ins can only be added for your own record.")
+        require_role(user, "coordinator", "caregiver")
+        return aftercare.add_checkin(store, ctx, caregiver_id, body.note, body.date)
+
+    # --- Credentials (REQ-CRED-01) ---
+    @app.post("/api/caregivers/{caregiver_id}/credentials", status_code=201)
+    @implements("REQ-CRED-01")
+    def add_credential(caregiver_id: str, body: CredentialIn, ctx: C, user: U):
+        require_role(user, "coordinator")
+        return credentials.add_credential(store, ctx, caregiver_id, body.type, body.expiryDate, body.issuedDate)
+
+    @app.get("/api/credentials/expiring")
+    @implements("REQ-CRED-01")
+    def expiring_credentials(user: U, days: int = Query(30, ge=0, le=365)):
+        require_role(user, "coordinator")
+        return {"days": days, "expiring": credentials.expiring_credentials(store, days)}
+
+    # --- Matching profile and suggestions (REQ-MATCH-02) ---
+    @app.post("/api/caregivers/{caregiver_id}/profile")
+    @implements("REQ-MATCH-02")
+    def set_profile(caregiver_id: str, body: ProfileIn, ctx: C, user: U):
+        require_role(user, "coordinator")
+        return matching.set_profile(store, ctx, caregiver_id, languages=body.languages, availability=body.availability.model_dump() if body.availability else None, capacity_visits_per_week=body.capacityVisitsPerWeek)
+
+    @app.get("/api/requests/{request_id}/suggestions")
+    @implements("REQ-MATCH-02")
+    def suggestions(request_id: str, user: U):
+        require_role(user, "coordinator")
+        return matching.suggest_caregivers(store, request_id)
+
+    # --- Visit check-in and check-out (REQ-EVV-01) ---
+    def _visit_or_404(visit_id: str) -> dict:
+        with store.lock:
+            visit = next((v for v in store.db["visits"] if v["id"] == visit_id), None)
+        if visit is None:
+            raise DomainError(404, "Visit not found.")
+        return visit
+
+    def _check_visit_owner(visit: dict, user: dict) -> None:
+        if user["role"] == "family":
+            raise DomainError(403, "Your role cannot do this.")
+        if user["role"] == "caregiver" and visit.get("caregiverId") != user.get("caregiverId"):
+            raise DomainError(403, "Check-in and check-out are only for your own visits.")
+
+    @app.post("/api/visits/{visit_id}/checkin")
+    @implements("REQ-EVV-01")
+    def visit_checkin(visit_id: str, body: CheckInOut, ctx: C, user: U):
+        visit = _visit_or_404(visit_id)
+        _check_visit_owner(visit, user)
+        return evv.check_in(store, ctx, visit_id, timestamp=body.timestamp.isoformat() if body.timestamp else None, location=body.location)
+
+    @app.post("/api/visits/{visit_id}/checkout")
+    @implements("REQ-EVV-01")
+    def visit_checkout(visit_id: str, body: CheckInOut, ctx: C, user: U):
+        visit = _visit_or_404(visit_id)
+        _check_visit_owner(visit, user)
+        return evv.check_out(store, ctx, visit_id, timestamp=body.timestamp.isoformat() if body.timestamp else None, location=body.location)
+
+    # --- Care plans (REQ-PLAN-01) ---
+    def _care_plan_scope(request_id: str, user: dict) -> dict:
+        with store.lock:
+            req = next((r for r in store.db["requests"] if r["id"] == request_id), None)
+        if req is None:
+            raise DomainError(404, "Request not found.")
+        if user["role"] == "coordinator":
+            return req
+        if user["role"] == "caregiver" and req.get("caregiverId") == user.get("caregiverId"):
+            return req
+        if user["role"] == "family" and req["id"] == user.get("requestId"):
+            return req
+        raise DomainError(403, "Your role cannot do this.")
+
+    @app.get("/api/requests/{request_id}/care-plan")
+    @implements("REQ-PLAN-01")
+    def get_care_plan(request_id: str, user: U):
+        _care_plan_scope(request_id, user)
+        plan = careplans.get_care_plan(store, request_id)
+        if plan is None:
+            raise DomainError(404, "Care plan not found.")
+        return plan
+
+    @app.post("/api/requests/{request_id}/care-plan")
+    @implements("REQ-PLAN-01")
+    def set_care_plan(request_id: str, body: CarePlanIn, ctx: C, user: U):
+        require_role(user, "coordinator")
+        return careplans.set_care_plan(store, ctx, request_id, body.goals)
+
+    @app.post("/api/requests/{request_id}/care-plan/tasks", status_code=201)
+    @implements("REQ-PLAN-01")
+    def add_care_plan_task(request_id: str, body: TaskIn, ctx: C, user: U):
+        require_role(user, "coordinator")
+        return careplans.add_task(store, ctx, request_id, body.title)
+
+    @app.post("/api/requests/{request_id}/care-plan/tasks/{task_id}/toggle")
+    @implements("REQ-PLAN-01")
+    def toggle_care_plan_task(request_id: str, task_id: str, ctx: C, user: U):
+        if user["role"] == "caregiver":
+            _care_plan_scope(request_id, user)  # Only the matched caregiver may toggle.
+        else:
+            require_role(user, "coordinator")
+        return careplans.toggle_task(store, ctx, request_id, task_id)
+
+    # --- Notifications (REQ-NOTIF-01) ---
+    @app.get("/api/notifications")
+    @implements("REQ-NOTIF-01")
+    def list_notifications(user: U):
+        return notifications.visible_notifications(store, user)
+
+    @app.post("/api/notifications/{notification_id}/read")
+    @implements("REQ-NOTIF-01")
+    def read_notification(notification_id: str, ctx: C, user: U):
+        return notifications.mark_read(store, ctx, notification_id, user)
+
+    @app.post("/api/notifications/check-missed")
+    @implements("REQ-NOTIF-01")
+    def check_missed(ctx: C, user: U):
+        require_role(user, "coordinator")
+        return notifications.check_missed_visits(store, ctx)
+
+    # --- Reports (REQ-REP-01) ---
+    @app.get("/api/reports/summary")
+    @implements("REQ-REP-01")
+    def reports_summary(user: U):
+        require_role(user, "coordinator")
+        return reports.summary(store)
+
+    # --- Incidents (REQ-SAFE-02) ---
+    @app.get("/api/incidents")
+    @implements("REQ-SAFE-02")
+    def list_incidents(user: U):
+        return incidents.list_incidents(store, user)
+
+    @app.post("/api/incidents", status_code=201)
+    @implements("REQ-SAFE-02")
+    def create_incident(body: IncidentIn, ctx: C, user: U):
+        require_role(user, "coordinator")
+        return incidents.create_incident(store, ctx, body.requestId, body.severity, body.description, visit_id=body.visitId, owner=user["email"])
+
+    @app.post("/api/incidents/{incident_id}/assign")
+    @implements("REQ-SAFE-02")
+    def assign_incident(incident_id: str, body: AssignIn, ctx: C, user: U):
+        require_role(user, "coordinator")
+        return incidents.assign_incident(store, ctx, incident_id, body.owner)
+
+    @app.post("/api/incidents/{incident_id}/resolve")
+    @implements("REQ-SAFE-02")
+    def resolve_incident(incident_id: str, body: ResolveIn, ctx: C, user: U):
+        require_role(user, "coordinator")
+        return incidents.resolve_incident(store, ctx, incident_id, body.resolution)
+
+    # --- Consent and erasure (REQ-PRIV-01) ---
+    @app.get("/api/consents")
+    @implements("REQ-PRIV-01")
+    def list_consents(user: U):
+        return privacy.list_consents(store, user)
+
+    @app.post("/api/consents", status_code=201)
+    @implements("REQ-PRIV-01")
+    def grant_consent(body: ConsentIn, ctx: C, user: U):
+        require_role(user, "coordinator")
+        return privacy.grant_consent(store, ctx, body.personType, body.personId, body.purposes)
+
+    @app.post("/api/consents/{consent_id}/withdraw")
+    @implements("REQ-PRIV-01")
+    def withdraw_consent(consent_id: str, ctx: C, user: U):
+        require_role(user, "coordinator")
+        return privacy.withdraw_consent(store, ctx, consent_id)
+
+    @app.post("/api/caregivers/{caregiver_id}/erase")
+    @implements("REQ-PRIV-01")
+    def erase_caregiver(caregiver_id: str, ctx: C, user: U):
+        require_role(user, "coordinator")
+        return privacy.erase_caregiver(store, ctx, caregiver_id)
+
+    # --- Breach register (REQ-PRIV-02) ---
+    @app.get("/api/breaches")
+    @implements("REQ-PRIV-02")
+    def list_breaches(user: U):
+        require_role(user, "coordinator")
+        return breach.list_breaches(store)
+
+    @app.post("/api/breaches", status_code=201)
+    @implements("REQ-PRIV-02")
+    def create_breach(body: BreachIn, ctx: C, user: U):
+        require_role(user, "coordinator")
+        return breach.create_breach(store, ctx, body.title, body.description, body.affectedPersonIds, body.discoveredAt)
+
+    @app.post("/api/breaches/{breach_id}/notify")
+    @implements("REQ-PRIV-02")
+    def notify_breach(breach_id: str, ctx: C, user: U):
+        require_role(user, "coordinator")
+        return breach.notify_breach(store, ctx, breach_id)
+
+    @app.post("/api/breaches/{breach_id}/report")
+    @implements("REQ-PRIV-02")
+    def report_breach(breach_id: str, ctx: C, user: U):
+        require_role(user, "coordinator")
+        return breach.report_breach(store, ctx, breach_id)
 
     @app.get("/api/audit")
     @implements("REQ-TRC-03", "REQ-RBAC-01")
