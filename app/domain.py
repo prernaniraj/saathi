@@ -11,6 +11,8 @@ MODULES = [
     "Reporting and ethics",
 ]
 MOODS = ["Good", "Okay", "Needs attention"]
+VERIFICATION = [("identity", "Identity document"), ("background", "Background check"), ("references", "References")]
+VERIFICATION_STATUSES = ["Pending", "Verified", "Failed"]
 
 
 class DomainError(Exception):

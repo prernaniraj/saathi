@@ -47,19 +47,22 @@ def test_change_is_traceable_from_request_id_to_audit_event(client):
 
 @covers("REQ-TRC-02")
 def test_verify_endpoint_reports_intact_chain(client):
-    client.post("/api/caregivers", json={"name": "Divya", "city": "Pune"})
+    client.post("/api/caregivers", json={"name": "Divya", "city": "Pune", "dateOfBirth": "2005-05-05"})
     assert client.get("/api/audit/verify").json() == {"ok": True, "events": 1, "broken_at": None}
 
 
-@covers("REQ-PIPE-01", "REQ-PIPE-04", "REQ-MATCH-01", "REQ-VIS-01", "REQ-FAM-01")
+@covers("REQ-PIPE-01", "REQ-PIPE-04", "REQ-MATCH-01", "REQ-VIS-01", "REQ-FAM-01", "REQ-SAFE-01")
 def test_end_to_end_flow(client):
-    cid = client.post("/api/caregivers", json={"name": "Divya", "city": "Pune"}).json()["id"]
+    cid = client.post("/api/caregivers", json={"name": "Divya", "city": "Pune", "dateOfBirth": "2005-05-05"}).json()["id"]
     assert client.post(f"/api/caregivers/{cid}/certify").status_code == 409
     client.post(f"/api/caregivers/{cid}/start")
     for i in range(5):
         client.post(f"/api/caregivers/{cid}/modules/{i}")
     assert client.post(f"/api/caregivers/{cid}/certify").json()["stage"] == "Certified"
     rid = client.post("/api/requests", json={"family": "Nair", "parent": "Mrs. Nair", "city": "Pune", "visitsPerWeek": "2", "need": "Companionship"}).json()["id"]
+    assert client.post(f"/api/requests/{rid}/match", json={"caregiverId": cid}).status_code == 409
+    for item in ("identity", "background", "references"):
+        assert client.post(f"/api/caregivers/{cid}/verification/{item}", json={"status": "Verified"}).status_code == 200
     assert client.post(f"/api/requests/{rid}/match", json={"caregiverId": cid}).json()["status"] == "Matched"
     v = client.post("/api/visits", json={"requestId": rid, "mood": "Good", "note": "Tea and a walk."})
     assert v.status_code == 201
@@ -70,3 +73,12 @@ def test_errors_use_one_shape_and_status_codes(client):
     assert client.post("/api/caregivers", json={"name": " ", "city": "Pune"}).json() == {"error": "Name is required."}
     assert client.post("/api/requests", json={"family": "A", "parent": "B", "city": "C", "visitsPerWeek": 9, "need": "Companionship"}).status_code == 400
     assert client.post("/api/caregivers/nope/start").status_code == 404
+
+
+@covers("REQ-AFT-02")
+def test_under_eighteen_is_rejected_and_date_of_birth_is_not_returned(client):
+    r = client.post("/api/caregivers", json={"name": "Kid", "city": "Pune", "dateOfBirth": "2015-01-01"})
+    assert r.status_code == 400 and r.json() == {"error": "Care-leavers must be 18 or older."}
+    ok = client.post("/api/caregivers", json={"name": "Adult", "city": "Pune", "dateOfBirth": "2005-05-05"})
+    assert "dateOfBirth" not in ok.json()
+    assert all("dateOfBirth" not in c for c in client.get("/api/state").json()["caregivers"])

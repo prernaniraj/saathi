@@ -21,6 +21,7 @@ nav a[aria-current=page]{color:var(--ink);border-color:var(--mari);font-weight:6
 .chips{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}
 .chip{font:inherit;font-size:13px;padding:4px 10px;border-radius:99px;border:1px solid var(--line);background:none;color:var(--ink);cursor:pointer}
 .chip[aria-pressed=true]{background:var(--pine);border-color:var(--pine);color:var(--on)}
+.chip.bad{border-color:var(--warn);color:var(--warn)}
 .btn{font:inherit;padding:8px 14px;border-radius:8px;border:1px solid var(--pine);background:var(--pine);color:var(--on);cursor:pointer}
 .btn:disabled{opacity:.45;cursor:not-allowed}
 :focus-visible{outline:2px solid var(--mari);outline-offset:2px}

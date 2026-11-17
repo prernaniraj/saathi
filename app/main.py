@@ -4,6 +4,7 @@ import re
 import time
 import uuid
 from pathlib import Path
+from datetime import date
 from typing import Annotated, Literal
 
 from fastapi import Depends, FastAPI, Query, Request
@@ -20,12 +21,17 @@ from .trace import implements
 
 ROOT = Path(__file__).resolve().parent.parent
 Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
-LABELS = {"visitsPerWeek": "Visits per week", "requestId": "Family", "caregiverId": "Caregiver", "name": "Name", "city": "City", "family": "Family name", "parent": "Parent’s name", "note": "Note", "mood": "Mood", "need": "Need"}
+LABELS = {"dateOfBirth": "Date of birth", "status": "Status", "visitsPerWeek": "Visits per week", "requestId": "Family", "caregiverId": "Caregiver", "name": "Name", "city": "City", "family": "Family name", "parent": "Parent’s name", "note": "Note", "mood": "Mood", "need": "Need"}
 
 
 class CaregiverIn(BaseModel):
     name: Text
     city: Text
+    dateOfBirth: date
+
+
+class VerificationIn(BaseModel):
+    status: Literal["Pending", "Verified", "Failed"]
 
 
 class RequestIn(BaseModel):
@@ -54,7 +60,7 @@ def _trace_id_from(header: str | None) -> str | None:
 
 def create_app(data_file: str | Path | None = None, public_dir: str | Path | None = ROOT / "public") -> FastAPI:
     setup_logging(os.environ.get("LOG_LEVEL", "INFO"))
-    app = FastAPI(title="Saathi", version="0.2.0")
+    app = FastAPI(title="Saathi", version="0.3.0")
     app.state.store = store = Store(data_file)
     setup_tracing(app)
 
@@ -107,7 +113,7 @@ def create_app(data_file: str | Path | None = None, public_dir: str | Path | Non
 
     @app.post("/api/caregivers", status_code=201)
     def add_caregiver(body: CaregiverIn, ctx: C):
-        return service.add_caregiver(store, ctx, body.name, body.city)
+        return service.add_caregiver(store, ctx, body.name, body.city, body.dateOfBirth)
 
     @app.post("/api/caregivers/{caregiver_id}/start")
     def start(caregiver_id: str, ctx: C):
@@ -120,6 +126,10 @@ def create_app(data_file: str | Path | None = None, public_dir: str | Path | Non
     @app.post("/api/caregivers/{caregiver_id}/modules/{index}")
     def toggle(caregiver_id: str, index: int, ctx: C):
         return service.toggle_module(store, ctx, caregiver_id, index)
+
+    @app.post("/api/caregivers/{caregiver_id}/verification/{item}")
+    def verification(caregiver_id: str, item: str, body: VerificationIn, ctx: C):
+        return service.set_verification(store, ctx, caregiver_id, item, body.status)
 
     @app.post("/api/requests", status_code=201)
     def create_request(body: RequestIn, ctx: C):

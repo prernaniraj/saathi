@@ -3,11 +3,11 @@ the structured log line and the metric, so no change can skip observability or t
 import copy
 import functools
 import logging
+from datetime import date, datetime, timezone
 
-from .domain import MODULES, MOODS, NOTES, STAGES, Change, Ctx, DomainError
+from .domain import MODULES, MOODS, NOTES, STAGES, VERIFICATION, VERIFICATION_STATUSES, Change, Ctx, DomainError
 from .observability import event, metrics
 from .trace import implements
-from datetime import datetime, timezone
 
 
 @implements("REQ-TRC-05")
@@ -34,6 +34,35 @@ def mutation(action: str, *spec_refs: str):
 
     return deco
 
+MIN_AGE = 18
+
+
+def _today() -> date:
+    return datetime.now(timezone.utc).date()
+
+
+def _age(born: date, today: date) -> int:
+    return today.year - born.year - ((today.month, today.day) < (born.month, born.day))
+
+
+def _blank_checks() -> dict:
+    return {key: {"status": "Pending", "date": None} for key, _ in VERIFICATION}
+
+
+def is_cleared(c: dict) -> bool:
+    """True when identity, background and reference checks are all Verified."""
+    checks = c.get("verification", {})
+    return all(checks.get(key, {}).get("status") == "Verified" for key, _ in VERIFICATION)
+
+
+def _public(c: dict) -> dict:
+    """A copy without personal data that callers do not need (date of birth)."""
+    return copy.deepcopy({k: v for k, v in c.items() if k != "dateOfBirth"})
+
+
+def _change(c: dict, before) -> Change:
+    return Change("caregiver", c["id"], before, copy.deepcopy(c), _public(c))
+
 
 def _find(store, collection: str, item_id: str, label: str) -> dict:
     for item in store.db[collection]:
@@ -45,14 +74,38 @@ def _find(store, collection: str, item_id: str, label: str) -> dict:
 def get_state(store) -> dict:
     with store.lock:
         data = {k: v for k, v in store.db.items() if k in ("caregivers", "requests", "visits")}
-        return copy.deepcopy({"meta": {"stages": STAGES, "notes": NOTES, "modules": MODULES, "moods": MOODS}, **data})
+        state = copy.deepcopy({"meta": {"stages": STAGES, "notes": NOTES, "modules": MODULES, "moods": MOODS, "verification": [{"id": k, "label": l} for k, l in VERIFICATION], "verification_statuses": VERIFICATION_STATUSES}, **data})
+        for c in state["caregivers"]:
+            c.pop("dateOfBirth", None)
+        return state
 
 
-@mutation("caregiver.created", "REQ-PIPE-01")
-def add_caregiver(store, name: str, city: str) -> Change:
-    c = {"id": store.next_id("c"), "name": name, "city": city, "stage": "Applied", "modules": [0] * len(MODULES)}
+@mutation("caregiver.created", "REQ-PIPE-01", "REQ-AFT-02")
+def add_caregiver(store, name: str, city: str, date_of_birth: date, today: date | None = None) -> Change:
+    today = today or _today()
+    if date_of_birth > today:
+        raise DomainError(400, "Date of birth cannot be in the future.")
+    if _age(date_of_birth, today) < MIN_AGE:
+        raise DomainError(400, "Care-leavers must be 18 or older.")
+    c = {"id": store.next_id("c"), "name": name, "city": city, "dateOfBirth": date_of_birth.isoformat(), "stage": "Applied", "modules": [0] * len(MODULES), "verification": _blank_checks()}
     store.db["caregivers"].append(c)
-    return Change("caregiver", c["id"], None, copy.deepcopy(c), copy.deepcopy(c))
+    return _change(c, None)
+
+
+@mutation("caregiver.verification_set", "REQ-SAFE-01")
+def set_verification(store, caregiver_id: str, item: str, status: str, today: date | None = None) -> Change:
+    c = _find(store, "caregivers", caregiver_id, "Care-leaver")
+    if item not in {key for key, _ in VERIFICATION}:
+        raise DomainError(400, "Unknown check.")
+    if status not in VERIFICATION_STATUSES:
+        raise DomainError(400, "Unknown status.")
+    checks = copy.deepcopy(c.get("verification") or _blank_checks())
+    if checks.get(item, {}).get("status", "Pending") == status:
+        raise DomainError(409, "That check already has this status.")
+    before = copy.deepcopy(c)
+    checks[item] = {"status": status, "date": (today or _today()).isoformat()}
+    c["verification"] = checks
+    return _change(c, before)
 
 
 @mutation("caregiver.training_started", "REQ-PIPE-02")
@@ -62,7 +115,7 @@ def start_training(store, caregiver_id: str) -> Change:
         raise DomainError(409, "Training can only start from the Applied stage.")
     before = copy.deepcopy(c)
     c["stage"] = "Training"
-    return Change("caregiver", c["id"], before, copy.deepcopy(c), copy.deepcopy(c))
+    return _change(c, before)
 
 
 @mutation("caregiver.module_toggled", "REQ-PIPE-03")
@@ -74,7 +127,7 @@ def toggle_module(store, caregiver_id: str, index: int) -> Change:
         raise DomainError(409, "Modules can only be updated during training.")
     before = copy.deepcopy(c)
     c["modules"][index] = 0 if c["modules"][index] else 1
-    return Change("caregiver", c["id"], before, copy.deepcopy(c), copy.deepcopy(c))
+    return _change(c, before)
 
 
 @mutation("caregiver.certified", "REQ-PIPE-04")
@@ -86,7 +139,7 @@ def certify(store, caregiver_id: str) -> Change:
         raise DomainError(409, "Complete all five modules before certifying.")
     before = copy.deepcopy(c)
     c["stage"] = "Certified"
-    return Change("caregiver", c["id"], before, copy.deepcopy(c), copy.deepcopy(c))
+    return _change(c, before)
 
 
 @mutation("request.created", "REQ-FAM-01")
@@ -104,6 +157,8 @@ def match(store, request_id: str, caregiver_id: str) -> Change:
         raise DomainError(409, "This request already has a caregiver.")
     if c["stage"] != "Certified":
         raise DomainError(409, "Only certified caregivers can be matched.")
+    if not is_cleared(c):
+        raise DomainError(409, "Complete the identity, background and reference checks before matching.")
     before = {"request": copy.deepcopy(r), "caregiver": copy.deepcopy(c)}
     r["status"], r["caregiverId"], c["stage"] = "Matched", c["id"], "Matched"
     return Change("request", r["id"], before, {"request": copy.deepcopy(r), "caregiver": copy.deepcopy(c)}, copy.deepcopy(r))

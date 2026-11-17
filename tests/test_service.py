@@ -3,6 +3,7 @@ import io
 import json
 import logging
 import unittest
+from datetime import date
 
 from app import service
 from app.domain import Ctx, DomainError
@@ -11,6 +12,8 @@ from app.store import Store
 from tests._trace import covers
 
 CTX = Ctx("req-1", "t" * 32, "coordinator")
+DOB = date(2005, 5, 5)
+TODAY = date(2026, 11, 16)
 
 
 def make():
@@ -21,7 +24,7 @@ class PipelineRules(unittest.TestCase):
     @covers("REQ-PIPE-01")
     def test_add_caregiver_starts_in_applied(self):
         s = make()
-        c = service.add_caregiver(s, CTX, "Divya", "Pune")
+        c = service.add_caregiver(s, CTX, "Divya", "Pune", DOB)
         self.assertEqual((c["stage"], c["modules"]), ("Applied", [0, 0, 0, 0, 0]))
 
     @covers("REQ-PIPE-02")
@@ -93,7 +96,7 @@ class Traceability(unittest.TestCase):
     def test_tampering_breaks_the_chain(self):
         s = make()
         service.start_training(s, CTX, "c1")
-        service.add_caregiver(s, CTX, "Divya", "Pune")
+        service.add_caregiver(s, CTX, "Divya", "Pune", DOB)
         self.assertEqual(s.audit.verify(), {"ok": True, "events": 2, "broken_at": None})
         s.db["audit"][0]["actor"] = "someone-else"
         self.assertEqual(s.audit.verify()["broken_at"], 1)
@@ -102,7 +105,7 @@ class Traceability(unittest.TestCase):
     def test_removing_an_event_breaks_the_chain(self):
         s = make()
         for _ in range(3):
-            service.add_caregiver(s, CTX, "X", "Pune")
+            service.add_caregiver(s, CTX, "X", "Pune", DOB)
         del s.db["audit"][1]
         self.assertFalse(s.audit.verify()["ok"])
 
@@ -110,7 +113,7 @@ class Traceability(unittest.TestCase):
     def test_audit_query_filters_newest_first(self):
         s = make()
         service.start_training(s, CTX, "c1")
-        service.add_caregiver(s, CTX, "Divya", "Pune")
+        service.add_caregiver(s, CTX, "Divya", "Pune", DOB)
         self.assertEqual(s.audit.query()[0]["action"], "caregiver.created")
         self.assertEqual([e["entity_id"] for e in s.audit.query(entity_id="c1")], ["c1"])
         self.assertEqual(len(s.audit.query(action="nothing")), 0)
@@ -136,16 +139,16 @@ class Observability(unittest.TestCase):
         logger.setLevel(logging.INFO)
         token = request_id_var.set("req-xyz")
         try:
-            service.add_caregiver(make(), CTX, "Divya", "Pune")
+            service.add_caregiver(make(), CTX, "Divya", "Pune", DOB)
         finally:
             request_id_var.reset(token)
             logger.removeHandler(handler)
         line = json.loads(stream.getvalue().strip().splitlines()[-1])
-        self.assertEqual((line["msg"], line["request_id"], line["action"], line["spec_refs"]), ("change committed", "req-xyz", "caregiver.created", ["REQ-PIPE-01"]))
+        self.assertEqual((line["msg"], line["request_id"], line["action"], line["spec_refs"]), ("change committed", "req-xyz", "caregiver.created", ["REQ-PIPE-01", "REQ-AFT-02"]))
 
     @covers("REQ-OBS-03")
     def test_metrics_render_in_prometheus_format(self):
-        service.add_caregiver(make(), CTX, "Divya", "Pune")
+        service.add_caregiver(make(), CTX, "Divya", "Pune", DOB)
         metrics.observe("saathi_http_request_seconds", 0.02, route="/x")
         out = metrics.render()
         self.assertIn('saathi_changes_total{action="caregiver.created"}', out)
@@ -172,6 +175,66 @@ class StoreSafety(unittest.TestCase):
             service.start_training(s, CTX, "c1")
             again = Store(p)
             self.assertEqual(again.audit.verify(), {"ok": True, "events": 1, "broken_at": None})
+
+
+class AgeGate(unittest.TestCase):
+    @covers("REQ-AFT-02")
+    def test_exactly_eighteen_is_accepted_and_one_day_short_is_not(self):
+        s = make()
+        self.assertEqual(service.add_caregiver(s, CTX, "A", "Pune", date(2008, 11, 16), today=TODAY)["stage"], "Applied")
+        with self.assertRaises(DomainError) as e:
+            service.add_caregiver(s, CTX, "B", "Pune", date(2008, 11, 17), today=TODAY)
+        self.assertEqual((e.exception.status, e.exception.message), (400, "Care-leavers must be 18 or older."))
+
+    @covers("REQ-AFT-02")
+    def test_future_date_is_rejected_and_nothing_is_audited(self):
+        s = make()
+        with self.assertRaises(DomainError):
+            service.add_caregiver(s, CTX, "A", "Pune", date(2027, 1, 1), today=TODAY)
+        self.assertEqual(s.db["audit"], [])
+
+    @covers("REQ-AFT-02")
+    def test_date_of_birth_is_stored_but_never_returned(self):
+        s = make()
+        c = service.add_caregiver(s, CTX, "A", "Pune", DOB, today=TODAY)
+        self.assertNotIn("dateOfBirth", c)
+        self.assertEqual(s.db["caregivers"][-1]["dateOfBirth"], "2005-05-05")
+        self.assertTrue(all("dateOfBirth" not in x for x in service.get_state(s)["caregivers"]))
+
+
+class Verification(unittest.TestCase):
+    @covers("REQ-SAFE-01")
+    def test_match_is_blocked_until_all_three_checks_are_verified(self):
+        s = make()
+        with self.assertRaises(DomainError) as e:
+            service.match(s, CTX, "r2", "c4")
+        self.assertEqual(e.exception.status, 409)
+        service.set_verification(s, CTX, "c4", "references", "Verified", today=TODAY)
+        self.assertEqual(service.match(s, CTX, "r2", "c4")["status"], "Matched")
+
+    @covers("REQ-SAFE-01")
+    def test_a_failed_check_blocks_matching(self):
+        s = make()
+        service.set_verification(s, CTX, "c5", "background", "Failed", today=TODAY)
+        with self.assertRaises(DomainError):
+            service.match(s, CTX, "r2", "c5")
+
+    @covers("REQ-SAFE-01")
+    def test_status_and_date_are_recorded_and_audited(self):
+        s = make()
+        c = service.set_verification(s, CTX, "c1", "identity", "Verified", today=TODAY)
+        self.assertEqual(c["verification"]["identity"], {"status": "Verified", "date": "2026-11-16"})
+        ev = s.db["audit"][-1]
+        self.assertEqual((ev["action"], ev["spec_refs"], ev["before"]["verification"]["identity"]["status"]), ("caregiver.verification_set", ["REQ-SAFE-01"], "Pending"))
+
+    @covers("REQ-SAFE-01")
+    def test_unknown_check_unknown_status_and_repeat_are_rejected(self):
+        s = make()
+        for args, status in ((("c1", "passport", "Verified"), 400), (("c1", "identity", "Maybe"), 400), (("c5", "identity", "Verified"), 409)):
+            with self.assertRaises(DomainError) as e:
+                service.set_verification(s, CTX, *args)
+            self.assertEqual(e.exception.status, status)
+        self.assertEqual(s.db["audit"], [])
 
 
 class TraceabilityTooling(unittest.TestCase):

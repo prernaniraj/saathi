@@ -2,7 +2,7 @@
 
 Proof of concept for a care-leaver-to-caregiver pipeline. Young adults leaving child care institutions are trained and certified as eldercare companions, matched to families who pay from abroad, and log visit updates the family can read.
 
-Version 0.2. Backend: Python 3.11+ and FastAPI. Front end: plain HTML and ES modules in `public/`.
+Version 0.3. Backend: Python 3.11+ and FastAPI. Front end: plain HTML and ES modules in `public/`.
 
 ## 1. Change rule
 
@@ -31,6 +31,7 @@ There is no login yet. The actor on an audit event is the `X-Actor` header, whic
 
 - **Stages:** Applied → Training → Certified → Matched.
 - **Training modules (5):** safety and hygiene; companionship and conversation; dementia basics; medication reminders and emergencies; reporting and ethics.
+- **Verification checks:** identity, background, references; each Pending, Verified or Failed.
 - **Request status:** Open → Matched.
 - **Visit mood:** Good, Okay, Needs attention.
 
@@ -42,7 +43,7 @@ Status is Implemented, Partial or Planned. Priority: P0 must have before real us
 
 | ID | Requirement | Priority | Status |
 | --- | --- | --- | --- |
-| REQ-PIPE-01 | A care-leaver can be added with a name and city and starts in Applied | P0 | Implemented |
+| REQ-PIPE-01 | A care-leaver can be added with a name, city and date of birth and starts in Applied | P0 | Implemented |
 | REQ-PIPE-02 | Training can start only from Applied | P0 | Implemented |
 | REQ-PIPE-03 | Module progress can change only during training, and only for the five known modules | P0 | Implemented |
 | REQ-PIPE-04 | Certification needs stage Training and all five modules complete | P0 | Implemented |
@@ -50,7 +51,14 @@ Status is Implemented, Partial or Planned. Priority: P0 must have before real us
 | REQ-MATCH-01 | A match needs an Open request and a Certified caregiver; both move to Matched together | P0 | Implemented |
 | REQ-VIS-01 | A visit can be logged only for a Matched request, with a valid mood and a non-empty note | P0 | Implemented |
 
-### 4.2 Observability
+### 4.2 Eligibility and safety
+
+| ID | Requirement | Priority | Status |
+| --- | --- | --- | --- |
+| REQ-AFT-02 | Only adults are enrolled: date of birth is required, anyone under 18 or with a future date is rejected, and the date of birth is stored but not returned by the state API | P0 | Implemented |
+| REQ-SAFE-01 | A caregiver can be matched only when identity document, background check and references are all Verified; each check keeps a status (Pending, Verified, Failed) and the date it was set | P0 | Implemented |
+
+### 4.3 Observability
 
 | ID | Requirement | Priority | Status |
 | --- | --- | --- | --- |
@@ -62,7 +70,7 @@ Status is Implemented, Partial or Planned. Priority: P0 must have before real us
 
 REQ-OBS-05 is written but has not been run end to end.
 
-### 4.3 Traceability
+### 4.4 Traceability
 
 | ID | Requirement | Priority | Status |
 | --- | --- | --- | --- |
@@ -73,14 +81,12 @@ REQ-OBS-05 is written but has not been run end to end.
 | REQ-TRC-05 | A rejected change is logged and counted but not written to the audit log, because nothing changed | P1 | Implemented |
 | REQ-TRC-06 | A corrupt data file stops startup instead of being replaced, and state plus audit chain survive a restart | P0 | Implemented |
 
-### 4.4 Researched backlog
+### 4.5 Researched backlog
 
 Each item names the research behind it (section 7). Not built.
 
 | ID | Requirement | Priority | Status |
 | --- | --- | --- | --- |
-| REQ-AFT-02 | Enroll only adults: record date of birth, block anyone under 18 | P0 | Planned |
-| REQ-SAFE-01 | Verification before a caregiver can be matched: identity document, background check, references, each with a status and date | P0 | Planned |
 | REQ-SAFE-02 | Incident report and escalation workflow, with owner, severity and resolution; a Needs attention visit opens one | P0 | Planned |
 | REQ-RBAC-01 | Login and roles (coordinator, caregiver, family); a family sees only its own parent’s updates; the audit actor comes from the login | P0 | Planned |
 | REQ-PRIV-01 | Consent and notice for every person whose data is held, a way to withdraw, and retention and erasure rules | P0 | Planned |
@@ -102,10 +108,11 @@ Every Planned item, when built, must follow section 1 and add its own audit acti
 | Method and path | Requirement |
 | --- | --- |
 | `GET /api/state` | read-only |
-| `POST /api/caregivers` | REQ-PIPE-01 |
+| `POST /api/caregivers` (name, city, dateOfBirth) | REQ-PIPE-01, REQ-AFT-02 |
 | `POST /api/caregivers/{id}/start` | REQ-PIPE-02 |
 | `POST /api/caregivers/{id}/modules/{index}` | REQ-PIPE-03 |
 | `POST /api/caregivers/{id}/certify` | REQ-PIPE-04 |
+| `POST /api/caregivers/{id}/verification/{item}` (status) | REQ-SAFE-01 |
 | `POST /api/requests` | REQ-FAM-01 |
 | `POST /api/requests/{id}/match` | REQ-MATCH-01 |
 | `POST /api/visits` | REQ-VIS-01 |
@@ -125,7 +132,7 @@ Errors are always `{"error": "message"}` with status 400 (invalid input), 404 (n
 
 **Alerts to set once deployed.** `/readyz` failing; any increase in `saathi_changes_rejected_total` with status 500; a spike in `saathi_validation_errors_total`.
 
-**Limits.** The hash chain proves history was not edited after the fact; it does not stop someone with file access from rewriting the whole chain. Anchor the latest hash somewhere else (a log sink or a separate store) before real use. The JSON file store is single-process.
+**Limits.** The hash chain proves history was not edited after the fact; it does not stop someone with file access from rewriting the whole chain. Anchor the latest hash somewhere else (a log sink or a separate store) before real use. The JSON file store is single-process. Date of birth is held in the data file and in audit events, so the audit endpoint exposes it until REQ-RBAC-01 restricts access.
 
 ## 7. Research behind the backlog
 
