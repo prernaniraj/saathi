@@ -1,0 +1,281 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Saathi POC on AWS free tier. One t3.micro EC2 instance (Amazon Linux 2023)
+  running the FastAPI app behind nginx on port 80, with a fixed Elastic IP as
+  the URL, SQLite data on the instance's EBS volume, and shell access through
+  Session Manager (no SSH port). A budget alarm emails you before costs grow.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: "App source" }
+        Parameters: [RepoUrl, Branch]
+      - Label: { default: "Access" }
+        Parameters: [SeedPassword, AllowedCidr]
+      - Label: { default: "Sizing and cost guard" }
+        Parameters: [InstanceType, AlertEmail, MonthlyBudgetUsd]
+
+Parameters:
+  RepoUrl:
+    Type: String
+    Description: HTTPS git URL of the Saathi repository (must contain pyproject.toml and app/).
+    AllowedPattern: "^https://[^\\s]+\\.git$|^https://github\\.com/[^\\s]+$"
+    ConstraintDescription: Must be an https:// git URL.
+  Branch:
+    Type: String
+    Default: main
+    Description: Branch or tag to deploy.
+  SeedPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 12
+    MaxLength: 64
+    AllowedPattern: "^[A-Za-z0-9]{12,64}$"
+    Description: Password for the seeded coordinator. Letters and digits only, 12 to 64 characters. Stored in the instance's .env file (see README).
+  AllowedCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: CIDR allowed to reach the app on port 80. Use your own IP/32 to lock it down.
+    AllowedPattern: "^(\\d{1,3}\\.){3}\\d{1,3}/\\d{1,2}$"
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedValues: [t3.micro, t2.micro]
+    Description: Free-tier eligible size. t2.micro is only free in regions where t3.micro is unavailable.
+  AlertEmail:
+    Type: String
+    Description: Email that receives budget alerts.
+    AllowedPattern: "^[^@\\s]+@[^@\\s]+$"
+  MonthlyBudgetUsd:
+    Type: Number
+    Default: 5
+    MinValue: 1
+    Description: Monthly cost limit in USD. You get an email at 80 percent of it.
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: Amazon Linux 2023 AMI, resolved from SSM at deploy time.
+
+Resources:
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.20.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-vpc" }
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-igw" }
+
+  IgwAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.20.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-public" }
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-public-rt" }
+
+  DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: IgwAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Saathi web traffic on 80 and 443. No SSH; use Session Manager.
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: !Ref AllowedCidr }
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: !Ref AllowedCidr }
+      SecurityGroupEgress:
+        - { IpProtocol: -1, CidrIp: 0.0.0.0/0 }
+
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref InstanceRole]
+
+  Instance:
+    Type: AWS::EC2::Instance
+    CreationPolicy:
+      ResourceSignal:
+        Count: 1
+        Timeout: PT25M
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref InstanceProfile
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds: [!Ref AppSecurityGroup]
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 20
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: true
+      MetadataOptions:
+        HttpTokens: required
+        HttpEndpoint: enabled
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-app" }
+        - { Key: app, Value: saathi }
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          exec > /var/log/user-data.log 2>&1
+
+          dnf install -y git nginx python3.11 python3.11-pip
+          dnf install -y aws-cfn-bootstrap || true
+
+          useradd --system --home-dir /opt/saathi --shell /sbin/nologin saathi || true
+          git clone --depth 1 --branch ${Branch} ${RepoUrl} /opt/saathi
+          mkdir -p /opt/saathi/data
+          python3.11 -m venv /opt/saathi/venv
+          /opt/saathi/venv/bin/pip install /opt/saathi
+
+          cat > /opt/saathi/.env <<'ENVEOF'
+          SAATHI_SEED_PASSWORD=${SeedPassword}
+          LOG_LEVEL=INFO
+          PORT=8000
+          ENVEOF
+          chmod 600 /opt/saathi/.env
+          chown -R saathi:saathi /opt/saathi
+
+          cat > /etc/systemd/system/saathi.service <<'UNITEOF'
+          [Unit]
+          Description=Saathi POC API
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          User=saathi
+          Group=saathi
+          WorkingDirectory=/opt/saathi
+          ExecStart=/opt/saathi/venv/bin/python -m app
+          Restart=on-failure
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+          UNITEOF
+
+          cat > /etc/nginx/conf.d/saathi.conf <<'NGINXEOF'
+          server {
+              listen 80 default_server;
+              server_name _;
+              client_max_body_size 1m;
+
+              add_header X-Content-Type-Options nosniff always;
+              add_header X-Frame-Options DENY always;
+              add_header Referrer-Policy strict-origin-when-cross-origin always;
+
+              location / {
+                  proxy_pass http://127.0.0.1:8000;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+                  proxy_read_timeout 60s;
+              }
+          }
+          NGINXEOF
+          rm -f /etc/nginx/conf.d/default.conf
+
+          systemctl daemon-reload
+          systemctl enable --now saathi nginx
+
+          SIGNAL=1
+          for i in $(seq 1 40); do
+            if curl -fsS http://127.0.0.1:8000/readyz > /dev/null; then SIGNAL=0; break; fi
+            sleep 5
+          done
+          /opt/aws/bin/cfn-signal -e $SIGNAL --stack ${AWS::StackName} --resource Instance --region ${AWS::Region}
+
+  ElasticIp:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-ip" }
+
+  ElasticIpAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt ElasticIp.AllocationId
+      InstanceId: !Ref Instance
+
+  CostBudget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: !Sub "${AWS::StackName}-monthly-cost"
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit:
+          Amount: !Ref MonthlyBudgetUsd
+          Unit: USD
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 80
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref AlertEmail
+
+Outputs:
+  AppUrl:
+    Description: Open this in a browser.
+    Value: !Sub "http://${ElasticIp}"
+  InstanceId:
+    Description: "Use with aws ssm start-session --target <id>"
+    Value: !Ref Instance
+  PublicIp:
+    Value: !Ref ElasticIp
+  CoordinatorLogin:
+    Description: Log in as coordinator@saathi.local with the SeedPassword you chose.
+    Value: coordinator@saathi.local
