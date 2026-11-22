@@ -85,8 +85,11 @@ class Metrics:
                 for (n, l), h in sorted(self.hist.items()):
                     if n != name:
                         continue
-                    lines += [f'{n}_bucket{self._fmt(l, f"le=\"{e}\"")} {c}' for e, c in zip(BUCKETS, h["b"])]
-                    lines.append(f'{n}_bucket{self._fmt(l, "le=\"+Inf\"")} {h["n"]}')
+                    for e, c in zip(BUCKETS, h["b"]):
+                        le = 'le="' + str(e) + '"'
+                        lines.append(f'{n}_bucket{self._fmt(l, le)} {c}')
+                    inf = 'le="+Inf"'
+                    lines.append(f'{n}_bucket{self._fmt(l, inf)} {h["n"]}')
                     lines.append(f"{n}_sum{self._fmt(l)} {h['sum']:.6f}")
                     lines.append(f"{n}_count{self._fmt(l)} {h['n']}")
         return "\n".join(lines) + "\n"
