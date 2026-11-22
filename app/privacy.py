@@ -8,14 +8,16 @@ the audit chain still refer to something.
 
 Erasure audit safety: the audit event for an erasure is built with redacted
 before/after payloads that contain only placeholders, never the erased
-personal data. Note the known limit this does not fix: earlier audit events
-(e.g. the original ``caregiver.created``) still hold the name, because the
-hash chain cannot be rewritten. See SPEC.md section 8.
+personal data. Earlier audit events are protected by REQ-PRIV-03: personal
+data in every audit payload is stored encrypted under a per-person key, and
+erasure deletes that key, so the earlier events can no longer be read back
+while the hash chain still verifies. See app/erasure.py and SPEC.md section 8.
 """
 import copy
 from datetime import datetime, timezone
 
 from .domain import Change, DomainError
+from .erasure import delete_person_key
 from .service import mutation
 from .trace import implements
 
@@ -131,6 +133,12 @@ def erase_caregiver(store, caregiver_id: str) -> Change:
     the same change. The audit event's before/after payloads are built from
     the redacted copy only, so the erased personal data never lands in the
     audit log via this event.
+
+    REQ-PRIV-03: the person's audit key is deleted as part of the same
+    change, so earlier audit events (for example the original
+    ``caregiver.created``) can no longer be read back -- their stored
+    ciphertext stays unchanged, so the hash chain still verifies, and audit
+    reads show "[erased]" for those fields instead of the name.
     """
     c = next((x for x in store.db["caregivers"] if x["id"] == caregiver_id), None)
     if c is None:
@@ -148,4 +156,5 @@ def erase_caregiver(store, caregiver_id: str) -> Change:
     c["erased"] = True
     c["erasedAt"] = _now_iso()
     after = _redacted(c, erased=True)
+    delete_person_key(store.db, caregiver_id)
     return Change("caregiver", c["id"], before, after, copy.deepcopy(after))

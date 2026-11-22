@@ -4,6 +4,7 @@ import json
 from datetime import datetime, timezone
 
 from .domain import Change, Ctx
+from .erasure import decrypt_event
 from .trace import implements
 
 GENESIS = "0" * 64
@@ -16,8 +17,11 @@ def _digest(event: dict) -> str:
 
 
 class AuditLog:
-    def __init__(self, events: list):
+    def __init__(self, events: list, keys: dict | None = None):
         self.events = events
+        # Per-person audit keys (REQ-PRIV-03). Reads decrypt through them;
+        # a key deleted by erasure makes that person's fields unreadable.
+        self._keys = keys if keys is not None else {}
 
     @implements("REQ-TRC-01", "REQ-TRC-02")
     def append(self, ctx: Ctx, action: str, change: Change, spec_refs: tuple) -> dict:
@@ -51,4 +55,6 @@ class AuditLog:
     @implements("REQ-TRC-03")
     def query(self, entity_id: str | None = None, action: str | None = None, limit: int = 50) -> list:
         rows = [e for e in reversed(self.events) if (not entity_id or e["entity_id"] == entity_id) and (not action or e["action"] == action)]
-        return rows[:limit]
+        # Reads return decrypted copies; the stored events are never modified.
+        # Fields whose key was deleted by erasure come back as "[erased]".
+        return [decrypt_event(self._keys, e) for e in rows[:limit]]

@@ -22,7 +22,7 @@ Data is saved in `data/saathi.sqlite`. Delete it to restore the sample data. A c
 
 Every `/api/*` route except login needs a bearer token: log in at `/login.html` or `POST /api/auth/login` with `{email, password}` and send `Authorization: Bearer <token>`. Tokens expire after 7 days; `POST /api/auth/logout` invalidates one. The front end stores the token in `sessionStorage` and redirects to the login page on a 401.
 
-The seed coordinator account is `coordinator@saathi.local`. Its password is `SAATHI_SEED_PASSWORD` when that environment variable is set, otherwise a randomly generated password printed once to stdout at first boot — change it after first login. (There is no change-password endpoint yet; set `SAATHI_SEED_PASSWORD` before first boot to choose the password.) The coordinator creates other accounts with `POST /api/auth/users` (role `coordinator`, `caregiver` linked to a caregiver, or `family` linked to a request).
+The seed coordinator account is `coordinator@saathi.local`. Its password is `SAATHI_SEED_PASSWORD` when that environment variable is set, otherwise a randomly generated password printed once to stdout at first boot — change it after first login. (There is no change-password endpoint yet; set `SAATHI_SEED_PASSWORD` in `.env` before first boot to choose the password.) A `.env` file in the project root (see `.env.example`) is loaded automatically at startup and never overrides variables already set in the environment. The coordinator creates other accounts with `POST /api/auth/users` (role `coordinator`, `caregiver` linked to a caregiver, or `family` linked to a request).
 
 Local development only: with `SAATHI_DEV_NO_AUTH=1`, API calls without a token are accepted with the `X-Actor` header as the coordinator, as before. Never set this outside local development. `/healthz`, `/readyz` and `/metrics` need no login.
 
@@ -37,7 +37,7 @@ Dashboard `/`, Pipeline, Family requests, Visit log, Family view, Incidents, Bre
 | Request ID and trace ID on every response | `X-Request-ID`, `X-Trace-ID` headers; send `X-Request-ID` or `traceparent` to reuse yours |
 | JSON logs with request ID, trace ID, action, actor, spec refs | stdout |
 | Prometheus metrics | `GET /metrics` |
-| Liveness and readiness | `GET /healthz`, `GET /readyz` (503 if the audit chain is broken) |
+| Liveness and readiness | `GET /healthz`, `GET /readyz` (503 if the audit chain is broken or the audit anchor does not match) |
 | Hash-chained audit log | `GET /api/audit`, `GET /api/audit/verify`, Audit page |
 | Requirement to code to test | `docs/TRACEABILITY.md` |
 | Optional OpenTelemetry export | `pip install -e ".[otel]"` and set `OTEL_EXPORTER_OTLP_ENDPOINT` |
@@ -62,6 +62,8 @@ app/incidents.py     incident reports and escalation (REQ-SAFE-02)
 app/privacy.py       consent, notice, retention and erasure (REQ-PRIV-01)
 app/breach.py        breach register with the 72-hour clock (REQ-PRIV-02)
 app/audit.py         hash-chained audit log
+app/anchor.py        audit hash anchor file and /readyz anchor check (REQ-TRC-07)
+app/envfile.py       .env auto-load at startup, stdlib only (REQ-CFG-01)
 app/observability.py JSON logs, metrics, optional OpenTelemetry
 app/store.py         SQLite store (one state table, whole state saved in one transaction)
 app/main.py          FastAPI routes, middleware, static files

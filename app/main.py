@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, StringConstraints
 
-from . import aftercare, auth, breach, careplans, credentials, evv, incidents, matching, notifications, privacy, reports, service
+from . import aftercare, anchor, auth, breach, careplans, credentials, envfile, evv, incidents, matching, notifications, privacy, reports, service
 from .domain import Ctx, DomainError
 from .observability import event, metrics, otel_trace_id, request_id_var, setup_logging, setup_tracing, trace_id_var
 from .store import Store
@@ -164,7 +164,9 @@ def _trace_id_from(header: str | None) -> str | None:
 
 
 def create_app(data_file: str | Path | None = None, public_dir: str | Path | None = ROOT / "public") -> FastAPI:
+    env_result = envfile.load_env_file()
     setup_logging(os.environ.get("LOG_LEVEL", "INFO"))
+    event(logging.INFO, "env file load", status=env_result["status"], loaded=env_result["loaded"], already_set=env_result["already_set"])
     app = FastAPI(title="Saathi", version="0.4.0")
     app.state.store = store = Store(data_file)
     setup_tracing(app)
@@ -590,12 +592,15 @@ def create_app(data_file: str | Path | None = None, public_dir: str | Path | Non
         return {"status": "ok"}
 
     @app.get("/readyz")
-    @implements("REQ-OBS-04")
+    @implements("REQ-OBS-04", "REQ-TRC-07")
     def readyz():
         with store.lock:
             result = store.audit.verify()
-        body = {"status": "ready" if result["ok"] else "audit chain broken", **result}
-        return JSONResponse(body, status_code=200 if result["ok"] else 503)
+            anchor_result = anchor.verify_anchor(store)
+        ready = result["ok"] and anchor_result["ok"]
+        status = "ready" if ready else ("audit chain broken" if not result["ok"] else "audit anchor mismatch")
+        body = {"status": status, **result, "ok": ready, "anchor_ok": anchor_result["ok"], "anchor": anchor_result}
+        return JSONResponse(body, status_code=200 if ready else 503)
 
     @app.get("/metrics", response_class=PlainTextResponse)
     @implements("REQ-OBS-03")

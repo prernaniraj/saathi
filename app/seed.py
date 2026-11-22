@@ -42,7 +42,7 @@ def seed() -> dict:
                       languages=["Hindi", "English"], days=["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"], capacity=4),
             caregiver("c3", "Meena", "Bengaluru", "Training", [1, 1, 1, 1, 0], "2006-01-30", ver("Verified"), "Bengaluru Bal Mandir",
                       languages=["Kannada", "English"], days=["Tuesday", "Thursday", "Saturday"]),
-            caregiver("c4", "Suresh", "Chennai", "Certified", list(ALL), "2005-11-02", ver("Verified", "Verified"), "Chennai Children's Home",
+            caregiver("c4", "Suresh", "Chennai", "Certified", list(ALL), "2006-11-02", ver("Verified", "Verified"), "Chennai Children's Home",
                       languages=["Tamil", "English"], days=["Monday", "Wednesday", "Friday"], capacity=2),
             caregiver("c5", "Lakshmi", "Hyderabad", "Certified", list(ALL), "2004-09-09", ver("Verified", "Verified", "Verified"), "Hyderabad Children's Home",
                       extended=True, languages=["Hindi", "English", "Telugu"],

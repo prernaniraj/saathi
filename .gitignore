@@ -7,3 +7,13 @@ data/db.tmp
 .DS_Store
 data/saathi.sqlite
 data/db.json.migrated
+.env
+.env.local
+data/audit-anchor.json
+data/audit-anchor.json.tmp
+
+.idea/
+.benchmarks/
+saathi.egg-info/
+*.bak
+*.before-*

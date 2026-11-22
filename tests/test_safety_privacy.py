@@ -239,8 +239,10 @@ def test_consent_and_erase_api_roles(client):
 @covers("REQ-PRIV-02")
 def test_breach_clock_is_discovery_plus_72_hours():
     s = make()
-    b = breach_mod.create_breach(s, CTX, "Lost phone", "A phone with visit notes was lost.", ["c6"], discovered_at="2026-11-16T10:00:00+00:00")
-    assert b["boardDueAt"] == "2026-11-19T10:00:00+00:00"
+    # Relative to now, so the 72-hour window is still open whatever the date.
+    discovered = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(hours=1)
+    b = breach_mod.create_breach(s, CTX, "Lost phone", "A phone with visit notes was lost.", ["c6"], discovered_at=discovered.isoformat())
+    assert b["boardDueAt"] == (discovered + timedelta(hours=72)).isoformat()
     assert b["status"] == "Open" and b["overdue"] is False
     assert b["notifiedAt"] is None and b["boardReportedAt"] is None
 

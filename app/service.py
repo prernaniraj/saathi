@@ -7,6 +7,7 @@ from datetime import date, datetime, timezone
 
 from .auth import ROLES, find_user, hash_password, public_user
 from .domain import MODULES, MOODS, NOTES, STAGES, VERIFICATION, VERIFICATION_STATUSES, Change, Ctx, DomainError
+from .erasure import encrypt_change
 from .observability import event, metrics
 from .trace import implements
 
@@ -23,7 +24,20 @@ def mutation(action: str, *spec_refs: str):
                     metrics.inc("saathi_changes_rejected_total", action=action, status=e.status)
                     event(logging.WARNING, "change rejected", action=action, status=e.status, reason=e.message, actor=ctx.actor, spec_refs=list(spec_refs))
                     raise
-                ev = store.audit.append(ctx, action, change, spec_refs)
+                # REQ-PRIV-03: personal data lands in the audit log encrypted
+                # under the affected person's key. The live state and the
+                # returned result are untouched; only the audited copies are
+                # encrypted, so erasure can later delete the key and the
+                # stored ciphertext (and therefore every hash) stays valid.
+                before, after = encrypt_change(store.db, change)
+                audited = Change(
+                    entity_type=change.entity_type,
+                    entity_id=change.entity_id,
+                    before=before,
+                    after=after,
+                    result=change.result,
+                )
+                ev = store.audit.append(ctx, action, audited, spec_refs)
                 store.save()
             metrics.inc("saathi_changes_total", action=action)
             event(logging.INFO, "change committed", action=action, entity=f"{change.entity_type}:{change.entity_id}", audit_seq=ev["seq"], actor=ctx.actor, spec_refs=list(spec_refs))
@@ -83,7 +97,7 @@ def get_state(store, user: dict | None = None) -> dict:
     with store.lock:
         # New modules are imported lazily: they import @mutation from here,
         # so importing them at module level would be circular.
-        from .aftercare import defaults_for
+        from .aftercare import aftercare_expired, defaults_for
         from .credentials import verification_stale
         from .privacy import consent_status_for
 
@@ -98,6 +112,9 @@ def get_state(store, user: dict | None = None) -> dict:
             # REQ-PRIV-01: flag consent per care-leaver so a withdrawn (or missing)
             # consent is visible on the caregiver page.
             c["consentStatus"] = consent_status_for(store.db, "caregiver", c["id"])
+            # REQ-AFT-04: flag whether the aftercare window has ended, so the
+            # Pipeline page can show it and matching can refuse a new match.
+            c["aftercareExpired"] = aftercare_expired(c)
         if user is None or user.get("role") == "coordinator":
             return state
         if user.get("role") == "caregiver":
@@ -266,8 +283,8 @@ def create_request(store, family: str, parent: str, city: str, visits_per_week: 
     return Change("request", r["id"], None, copy.deepcopy(r), copy.deepcopy(r))
 
 
-@mutation("request.matched", "REQ-MATCH-01")
-def match(store, request_id: str, caregiver_id: str) -> Change:
+@mutation("request.matched", "REQ-MATCH-01", "REQ-AFT-04")
+def match(store, request_id: str, caregiver_id: str, today: date | None = None) -> Change:
     r = _find(store, "requests", request_id, "Request")
     c = _find(store, "caregivers", caregiver_id, "Caregiver")
     if r["status"] != "Open":
@@ -276,9 +293,17 @@ def match(store, request_id: str, caregiver_id: str) -> Change:
         raise DomainError(409, "Only certified caregivers can be matched.")
     if not is_cleared(c):
         raise DomainError(409, "Complete the identity, background and reference checks before matching.")
+    # REQ-AFT-04: a care-leaver whose aftercare window has ended cannot be
+    # matched to a new request. Training, certification and existing matches
+    # are not blocked (see SPEC.md section 8). `today` exists so tests can
+    # pin the boundary day; callers pass nothing and get the real date.
+    from .aftercare import aftercare_expired
+
+    if aftercare_expired(c, today):
+        raise DomainError(409, "This care-leaver's aftercare window has ended, so they cannot be matched to a new request.")
     before = {"request": copy.deepcopy(r), "caregiver": copy.deepcopy(c)}
     r["status"], r["caregiverId"], c["stage"] = "Matched", c["id"], "Matched"
-    r["matchedAt"] = _today().isoformat()  # Reports count full weeks since this date (REQ-REP-01).
+    r["matchedAt"] = (today or _today()).isoformat()  # Reports count full weeks since this date (REQ-REP-01).
     return Change("request", r["id"], before, {"request": copy.deepcopy(r), "caregiver": copy.deepcopy(c)}, copy.deepcopy(r))
 
 

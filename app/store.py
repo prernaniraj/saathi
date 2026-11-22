@@ -23,13 +23,15 @@ import sqlite3
 import threading
 from pathlib import Path
 
+from .anchor import record_anchor
 from .audit import AuditLog
 from .auth import ensure_seed_coordinator
+from .erasure import migrate_audit
 from .seed import seed
 from .trace import implements
 
 STATE_TABLE = "CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
-ALL_KEYS = ("seq", "caregivers", "requests", "visits", "audit", "users", "sessions", "incidents", "consents", "breaches", "notifications")
+ALL_KEYS = ("seq", "caregivers", "requests", "visits", "audit", "users", "sessions", "incidents", "consents", "breaches", "notifications", "personKeys", "auditCrypto")
 
 
 class Store:
@@ -39,6 +41,7 @@ class Store:
     def __init__(self, path: str | Path | None = None, seed_password: str | None = None):
         self.path = Path(path) if path else None
         self.lock = threading.RLock()
+        self._anchor = None  # Audit anchor for in-memory stores (REQ-TRC-07); durable stores write the anchor file.
         self.db = None
         if self.path:
             if self.path.exists():
@@ -50,17 +53,31 @@ class Store:
                 else:
                     self.db = seed()
             self._normalize()
+            self._maybe_migrate_audit()
             ensure_seed_coordinator(self.db, seed_password, print_password=True)
             self.save()
         else:
             self.db = seed()
             self._normalize()
+            self._maybe_migrate_audit()
             ensure_seed_coordinator(self.db, seed_password, print_password=False)
+
+    def _maybe_migrate_audit(self) -> None:
+        """One-time migration for audit events stored in plaintext before
+        REQ-PRIV-03 (see app/erasure.py). Runs only when the store has no
+        ``auditCrypto`` marker, then sets the marker so it never runs again.
+        A fresh store has no events, so the migration is a no-op there."""
+        if self.db.get("auditCrypto"):
+            return
+        migrated = migrate_audit(self.db)
+        self.db["auditCrypto"] = {"version": 1, "migratedEvents": migrated}
 
     def _normalize(self) -> None:
         self.db.setdefault("seq", 100)
         for key in ("caregivers", "requests", "visits", "audit", "users", "sessions", "incidents", "consents", "breaches", "notifications"):
             self.db.setdefault(key, [])
+        self.db.setdefault("personKeys", {})
+        self.db.setdefault("auditCrypto", None)
 
     def _legacy_json_path(self) -> Path | None:
         """The legacy JSON file next to a SQLite path, if the path is not itself that file."""
@@ -118,7 +135,7 @@ class Store:
 
     @property
     def audit(self) -> AuditLog:
-        return AuditLog(self.db["audit"])
+        return AuditLog(self.db["audit"], keys=self.db.setdefault("personKeys", {}))
 
     def next_id(self, prefix: str) -> str:
         self.db["seq"] += 1
@@ -128,10 +145,17 @@ class Store:
     def save(self) -> None:
         """Persist the whole state, audit included, in one SQLite transaction."""
         if not self.path:
+            self.db.pop("_vacuum_needed", None)
+            record_anchor(self)
             return
+        vacuum = bool(self.db.pop("_vacuum_needed", False))
         self.path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.path)
         try:
+            # REQ-PRIV-03: zero the content of replaced/deleted rows (e.g. a
+            # deleted per-person audit key) instead of leaving it in freelist
+            # pages, and VACUUM after a key deletion to reclaim the pages.
+            conn.execute("PRAGMA secure_delete=ON")
             with conn:
                 conn.execute(STATE_TABLE)
                 conn.executemany(
@@ -139,5 +163,10 @@ class Store:
                     [(key, json.dumps(self.db.get(key), ensure_ascii=False)) for key in ALL_KEYS],
                 )
                 conn.execute(f"DELETE FROM state WHERE key NOT IN ({','.join('?' * len(ALL_KEYS))})", list(ALL_KEYS))
+            if vacuum:
+                conn.execute("VACUUM")
         finally:
             conn.close()
+        # REQ-TRC-07: anchor the new head after the commit. A failed anchor
+        # write is logged and counted inside record_anchor, never raised.
+        record_anchor(self)

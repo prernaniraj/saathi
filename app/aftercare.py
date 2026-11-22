@@ -1,6 +1,6 @@
 """Aftercare records for care-leavers: sending institution, eligibility window,
-linked child-protection contacts (REQ-AFT-01), identity documents, housing and
-wellbeing check-ins (REQ-AFT-03)."""
+linked child-protection contacts (REQ-AFT-01), enforced 23-year aftercare cap
+(REQ-AFT-04), identity documents, housing and wellbeing check-ins (REQ-AFT-03)."""
 import copy
 from datetime import date, datetime, timezone
 
@@ -52,14 +52,68 @@ def twenty_first_birthday(date_of_birth: str | None) -> str | None:
         return born.replace(year=born.year + 21, day=28).isoformat()
 
 
+def twenty_third_birthday(date_of_birth: str | None) -> str | None:
+    """The end of the aftercare window when the extension is recorded: the
+    23rd birthday."""
+    if not date_of_birth:
+        return None
+    try:
+        born = date.fromisoformat(date_of_birth)
+    except ValueError:
+        return None
+    try:
+        return born.replace(year=born.year + 23).isoformat()
+    except ValueError:  # 29 February: fall back to 28 February.
+        return born.replace(year=born.year + 23, day=28).isoformat()
+
+
+@implements("REQ-AFT-04")
+def aftercare_end(c: dict) -> date | None:
+    """The last day of a care-leaver's aftercare window, or None when no
+    window can be computed (no date of birth and no recorded until date).
+
+    A recorded ``aftercareUntil`` wins; otherwise the window ends on the
+    21st birthday, or the 23rd when the extension is recorded."""
+    until = c.get("aftercareUntil")
+    if until:
+        try:
+            return date.fromisoformat(until)
+        except ValueError:
+            return None
+    dob = c.get("dateOfBirth")
+    if not dob:
+        return None
+    if c.get("extended"):
+        return _as_date(twenty_third_birthday(dob), "Aftercare until")
+    return _as_date(twenty_first_birthday(dob), "Aftercare until")
+
+
+@implements("REQ-AFT-04")
+def aftercare_expired(c: dict, today: date | None = None) -> bool:
+    """True once a care-leaver's aftercare window has ended. The end date
+    itself is expired: on the 21st birthday (or the 23rd, when extended) the
+    window is over, not the day after."""
+    end = aftercare_end(c)
+    if end is None:
+        return False
+    return (today or datetime.now(timezone.utc).date()) >= end
+
+
 @implements("REQ-AFT-01", "REQ-AFT-03")
 def defaults_for(c: dict) -> dict:
     """Fill the aftercare/profile fields for a caregiver created before these
     features existed. Works on a copy (get_state passes one); it never writes
     to the stored record. The default aftercare window ends on the 21st
-    birthday; an extension to 23 is recorded explicitly, not assumed."""
+    birthday; an extension to 23 is recorded explicitly, not assumed. When
+    the extension is recorded but no until date is stored, the window ends
+    on the 23rd birthday (REQ-AFT-04)."""
     c.setdefault("institution", None)
-    c.setdefault("aftercareUntil", twenty_first_birthday(c.get("dateOfBirth")))
+    if c.get("aftercareUntil") is None:
+        c["aftercareUntil"] = (
+            twenty_third_birthday(c.get("dateOfBirth"))
+            if c.get("extended")
+            else twenty_first_birthday(c.get("dateOfBirth"))
+        )
     c.setdefault("extended", False)
     c.setdefault("contacts", [])
     c.setdefault("locationConsent", False)
@@ -95,6 +149,13 @@ def set_aftercare(store, caregiver_id: str, institution: str | None = None, afte
         c["institution"] = str(institution).strip()
     if until is not None:
         c["aftercareUntil"] = until.isoformat()
+    elif extended is True and c.get("dateOfBirth"):
+        # REQ-AFT-04: recording the extension moves the stored window to the
+        # 23rd birthday, so the recorded window and the flag agree; an
+        # explicit date still wins over the computed one.
+        end23 = twenty_third_birthday(c["dateOfBirth"])
+        if end23 is not None:
+            c["aftercareUntil"] = end23
     if extended is not None:
         c["extended"] = bool(extended)
     if contacts is not None:

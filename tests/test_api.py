@@ -77,7 +77,7 @@ def test_verify_endpoint_reports_intact_chain(client):
 
 @covers("REQ-PIPE-01", "REQ-PIPE-04", "REQ-MATCH-01", "REQ-VIS-01", "REQ-FAM-01", "REQ-SAFE-01")
 def test_end_to_end_flow(client):
-    cid = client.post("/api/caregivers", json={"name": "Divya", "city": "Pune", "dateOfBirth": "2005-05-05"}).json()["id"]
+    cid = client.post("/api/caregivers", json={"name": "Divya", "city": "Pune", "dateOfBirth": "2007-05-05"}).json()["id"]
     assert client.post(f"/api/caregivers/{cid}/certify").status_code == 409
     client.post(f"/api/caregivers/{cid}/start")
     for i in range(5):
@@ -176,7 +176,7 @@ def test_caregiver_sees_only_self_and_logs_only_own_visits(client):
 
 @covers("REQ-RBAC-01")
 def test_audit_is_role_scoped_and_date_of_birth_is_stripped_for_family(client):
-    cid = client.post("/api/caregivers", json={"name": "Divya", "city": "Pune", "dateOfBirth": "2005-05-05"}).json()["id"]
+    cid = client.post("/api/caregivers", json={"name": "Divya", "city": "Pune", "dateOfBirth": "2007-05-05"}).json()["id"]
     client.post(f"/api/caregivers/{cid}/start")
     for i in range(5):
         client.post(f"/api/caregivers/{cid}/modules/{i}")

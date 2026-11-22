@@ -18,6 +18,12 @@ const consentLine = (c) => {
     : `<button class="chip" data-a="consent-grant" data-id="${c.id}">Record consent</button>`;
   return `<p>${label} ${action}</p>`;
 };
+// REQ-AFT-04: an ended aftercare window is surfaced, not blocking silently —
+// the card flags it, and the Certified line below says they cannot be
+// matched to a new request. Existing matches and visits are untouched.
+const expiredLine = (c) => c.aftercareExpired
+  ? '<p><span class="flag">Aftercare window ended — cannot be matched to a new request</span></p>'
+  : '';
 const NEXT = { Pending: 'Verified', Verified: 'Failed', Failed: 'Pending' };
 const cleared = (c) => S.meta.verification.every((v) => c.verification?.[v.id]?.status === 'Verified');
 const checks = (c) => `<p class="mute">Checks (tap to change)</p><div class="chips">${S.meta.verification.map((v) => {
@@ -30,13 +36,13 @@ const detail = (c) => {
   if (c.stage === 'Training') return `<p class="mute">${done} of ${S.meta.modules.length} modules complete</p>
     <div class="chips">${S.meta.modules.map((m, i) => `<button class="chip" aria-pressed="${!!c.modules[i]}" data-a="mod" data-id="${c.id}" data-i="${i}">${m}</button>`).join('')}</div>
     <button class="btn" data-a="certify" data-id="${c.id}" ${done < S.meta.modules.length ? 'disabled' : ''}>Certify</button>${checks(c)}`;
-  if (c.stage === 'Certified') return `<p class="mute">${cleared(c) ? 'Certified and cleared. Ready to match on the Family requests page.' : 'Certified. Finish the checks before matching.'}</p>${checks(c)}`;
+  if (c.stage === 'Certified') return `<p class="mute">${c.aftercareExpired ? 'Certified and cleared, but the aftercare window has ended, so they cannot be matched to a new request.' : cleared(c) ? 'Certified and cleared. Ready to match on the Family requests page.' : 'Certified. Finish the checks before matching.'}</p>${checks(c)}`;
   const r = S.requests.find((r) => r.caregiverId === c.id);
   return r ? `<p>Visits ${esc(r.parent)} for the ${esc(r.family)}.</p>` : '';
 };
 function render() {
   $('#app').innerHTML = `<div class="cols">${S.meta.stages.map((st, i) => `<div><h3>${st}</h3><p class="mute">${S.meta.notes[i]}</p>${
-    S.caregivers.filter((c) => c.stage === st).map((c) => `<div class="card"><strong>${esc(c.name)}</strong> <span class="mute">${esc(c.city)}</span>${consentLine(c)}${detail(c)}</div>`).join('') || '<p class="mute">No one here yet.</p>'}</div>`).join('')}</div>`;
+    S.caregivers.filter((c) => c.stage === st).map((c) => `<div class="card"><strong>${esc(c.name)}</strong> <span class="mute">${esc(c.city)}</span>${consentLine(c)}${expiredLine(c)}${detail(c)}</div>`).join('') || '<p class="mute">No one here yet.</p>'}</div>`).join('')}</div>`;
 }
 const refresh = async () => { S = await getState(); consents = await api('/api/consents').catch(() => []); render(); };
 $('#app').addEventListener('click', (e) => {
